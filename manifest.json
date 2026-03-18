@@ -7,7 +7,7 @@
   "icon": "icon.svg",
   "type": "module",
   "slot": "tab",
-  "entry": "index.js",
-  "server": "server.js",
+  "entry": "dist/index.js",
+  "server": "dist/server.js",
   "permissions": []
 }

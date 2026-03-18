@@ -5,6 +5,8 @@
  * and PTY processes stay alive when the user navigates to other tabs.
  */
 
+import type { PluginAPI } from './types.js';
+
 // ── CDN version pins ──────────────────────────────────────────────────────────
 const CDN = 'https://esm.sh';
 const XTERM_VER     = '5.5.0';
@@ -14,8 +16,53 @@ const WEBGL_VER     = '0.18.0';
 const CLIPBOARD_VER = '0.1.0';
 const UNICODE11_VER = '0.8.0';
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface TerminalTheme {
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursorAccent: string;
+  selectionBackground: string;
+  selectionForeground?: string;
+  black: string; red: string; green: string; yellow: string;
+  blue: string; magenta: string; cyan: string; white: string;
+  brightBlack: string; brightRed: string; brightGreen: string; brightYellow: string;
+  brightBlue: string; brightMagenta: string; brightCyan: string; brightWhite: string;
+}
+
+interface Prefs {
+  theme: string;
+  fontSize: number;
+  fontFamily?: string;
+}
+
+interface XtermModules {
+  Terminal: any;
+  FitAddon: any;
+  WebLinksAddon: any;
+  WebglAddon: any;
+  ClipboardAddon: any;
+  Unicode11Addon: any;
+}
+
+interface GlobalState {
+  modules: XtermModules | null;
+  sessions: Map<string, TerminalSession>;
+  prefs: Prefs | null;
+  tabCounter: number;
+  activeId: string | null;
+}
+
+interface MobileKey {
+  label: string;
+  seq?: string;
+  modifier?: string;
+  svg?: boolean;
+}
+
 // ── Terminal themes ───────────────────────────────────────────────────────────
-const THEMES = {
+const THEMES: Record<string, TerminalTheme> = {
   'VS Dark': {
     background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#ffffff',
     cursorAccent: '#1e1e1e', selectionBackground: '#264f78',
@@ -67,43 +114,40 @@ const THEMES = {
 
 // ── Persistent prefs ──────────────────────────────────────────────────────────
 const PREFS_KEY = 'web-terminal-prefs';
-function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
-function savePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch {} }
+function loadPrefs(): Partial<Prefs> { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
+function savePrefs(p: Prefs): void { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
 
 // ── Global state — stored on window to survive Blob URL re-imports ────────────
-if (!window.__wtState) {
-  window.__wtState = {
-    modules: null,
-    sessions: new Map(),
-    prefs: null,
-    tabCounter: 0,
-    activeId: null,
-  };
+declare global {
+  interface Window { __wtState?: GlobalState; }
 }
-const _G = window.__wtState;
+
+if (!window.__wtState) {
+  window.__wtState = { modules: null, sessions: new Map(), prefs: null, tabCounter: 0, activeId: null };
+}
+const _G: GlobalState = window.__wtState;
 
 // ── Safe DOM helpers ──────────────────────────────────────────────────────────
-function el(tag, cls, text) {
+function el(tag: string, cls?: string | null, text?: string): HTMLElement {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
   if (text) e.textContent = text;
   return e;
 }
 
-function svgBtn(svgMarkup, title) {
-  const b = el('button', 'wt-btn');
+function svgBtn(svgMarkup: string, title?: string): HTMLButtonElement {
+  const b = el('button', 'wt-btn') as HTMLButtonElement;
   b.title = title || '';
-  // SVG markup is from hardcoded constants, not user input
   const span = el('span');
   span.innerHTML = svgMarkup; // eslint-disable-line -- trusted constant
   b.appendChild(span);
   return b;
 }
 
-function divider() { return el('div', 'wt-divider'); }
+function divider(): HTMLElement { return el('div', 'wt-divider'); }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
-function injectStyles() {
+function injectStyles(): void {
   if (document.getElementById('wt-css')) return;
 
   const link = document.createElement('link');
@@ -241,7 +285,7 @@ function injectStyles() {
 }
 
 // ── SVG icon constants ────────────────────────────────────────────────────────
-const IC = {
+const IC: Record<string, string> = {
   gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M6.8 1.5h2.4l.3 1.9 1.1.5 1.5-1 1.7 1.7-1 1.5.5 1.1 1.9.3v2.4l-1.9.3-1.1.5 1 1.5-1.7 1.7-1.5-1-1.1.5-.3 1.9H6.8l-.3-1.9-1.1-.5-1.5 1-1.7-1.7 1-1.5-.5-1.1-1.9-.3V6.1l1.9-.3.5-1.1-1-1.5L4.9 2l1.5 1 1.1-.5z"/><circle cx="8" cy="8" r="2"/></svg>',
   minus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="8" x2="13" y2="8"/></svg>',
   plus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>',
@@ -252,7 +296,7 @@ const IC = {
 };
 
 // ── WebSocket URL ─────────────────────────────────────────────────────────────
-function buildWsUrl() {
+function buildWsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const token = localStorage.getItem('auth-token') || '';
   const qs = token ? '?token=' + encodeURIComponent(token) : '';
@@ -260,13 +304,41 @@ function buildWsUrl() {
 }
 
 // ── Terminal session ──────────────────────────────────────────────────────────
+interface SessionOptions {
+  id: string; label: string;
+  Terminal: any; FitAddon: any; WebLinksAddon: any; WebglAddon: any;
+  ClipboardAddon: any; Unicode11Addon: any;
+  prefs: Prefs;
+  onChange: (id: string, status: string) => void;
+}
+
 class TerminalSession {
-  constructor({ id, label, Terminal, FitAddon, WebLinksAddon, WebglAddon, ClipboardAddon, Unicode11Addon, prefs, onChange }) {
-    this.id = id;
-    this.label = label;
+  id: string;
+  label: string;
+  status: string;
+  onChange: (id: string, status: string) => void;
+  prefs: Prefs;
+  el: HTMLElement;
+  overlayEl: HTMLElement;
+  terminal: any;
+  fitAddon: any;
+  ws: WebSocket | null;
+
+  private _destroyed: boolean;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null;
+  private _reconnectAttempts: number;
+  private _pingInterval: ReturnType<typeof setInterval> | null;
+  private _needsReconnect: boolean;
+  private _hasConnectedBefore: boolean;
+  private _dataDisposable: { dispose(): void } | null;
+  private _ro: ResizeObserver;
+
+  constructor(opts: SessionOptions) {
+    this.id = opts.id;
+    this.label = opts.label;
     this.status = 'connecting';
-    this.onChange = onChange;
-    this.prefs = prefs;
+    this.onChange = opts.onChange;
+    this.prefs = opts.prefs;
     this._destroyed = false;
     this._reconnectTimer = null;
     this._reconnectAttempts = 0;
@@ -277,35 +349,31 @@ class TerminalSession {
     this.el.appendChild(this.overlayEl);
     this._showOverlay('connecting', 'Connecting...', 'Starting shell session');
 
-    this.terminal = new Terminal({
+    this.terminal = new opts.Terminal({
       cursorBlink: true,
-      fontSize: prefs.fontSize || 14,
-      fontFamily: prefs.fontFamily || "Menlo, Monaco, 'Courier New', monospace",
-      allowProposedApi: true,
-      convertEol: true,
-      scrollback: 10000,
-      tabStopWidth: 4,
-      macOptionIsMeta: true,
-      macOptionClickForcesSelection: true,
-      theme: THEMES[prefs.theme || 'VS Dark'],
+      fontSize: opts.prefs.fontSize || 14,
+      fontFamily: opts.prefs.fontFamily || "Menlo, Monaco, 'Courier New', monospace",
+      allowProposedApi: true, convertEol: true, scrollback: 10000,
+      tabStopWidth: 4, macOptionIsMeta: true, macOptionClickForcesSelection: true,
+      theme: THEMES[opts.prefs.theme || 'VS Dark'],
     });
 
-    this.fitAddon = new FitAddon();
+    this.fitAddon = new opts.FitAddon();
     this.terminal.loadAddon(this.fitAddon);
-    this.terminal.loadAddon(new WebLinksAddon());
+    this.terminal.loadAddon(new opts.WebLinksAddon());
 
-    if (Unicode11Addon) { try { const u = new Unicode11Addon(); this.terminal.loadAddon(u); this.terminal.unicode.activeVersion = '11'; } catch {} }
-    if (ClipboardAddon) { try { this.terminal.loadAddon(new ClipboardAddon()); } catch {} }
+    if (opts.Unicode11Addon) { try { const u = new opts.Unicode11Addon(); this.terminal.loadAddon(u); this.terminal.unicode.activeVersion = '11'; } catch { /* ignore */ } }
+    if (opts.ClipboardAddon) { try { this.terminal.loadAddon(new opts.ClipboardAddon()); } catch { /* ignore */ } }
 
     this.terminal.open(this.el);
 
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
+      const webgl = new opts.WebglAddon();
+      webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* ignore */ } });
       this.terminal.loadAddon(webgl);
-    } catch {}
+    } catch { /* ignore */ }
 
-    this.terminal.attachCustomKeyEventHandler((e) => {
+    this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 'c' && this.terminal.hasSelection()) {
@@ -315,13 +383,13 @@ class TerminalSession {
       }
       if (mod && e.key.toLowerCase() === 'v') {
         e.preventDefault();
-        navigator.clipboard?.readText?.().then(t => t && this._send(t)).catch(() => {});
+        navigator.clipboard?.readText?.().then((t: string) => t && this._send(t)).catch(() => {});
         return false;
       }
       return true;
     });
 
-    this._dataDisposable = this.terminal.onData((d) => this._send(d));
+    this._dataDisposable = this.terminal.onData((d: string) => this._send(d));
     this._ro = new ResizeObserver(() => this._fit());
     this._ro.observe(this.el);
 
@@ -331,18 +399,16 @@ class TerminalSession {
     this._connect();
   }
 
-  _connect() {
+  private _connect(): void {
     if (this._destroyed) return;
-    clearTimeout(this._reconnectTimer);
-    clearInterval(this._pingInterval);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this._pingInterval) clearInterval(this._pingInterval);
 
     if (this.ws) {
       const old = this.ws;
       this.ws = null;
-      old.onclose = null;
-      old.onerror = null;
-      old.onmessage = null;
-      try { old.close(); } catch {}
+      old.onclose = null; old.onerror = null; old.onmessage = null;
+      try { old.close(); } catch { /* ignore */ }
     }
 
     this._setStatus('connecting');
@@ -350,15 +416,15 @@ class TerminalSession {
       this._showOverlay('connecting', 'Connecting...', 'Starting shell session');
     }
 
-    let ws;
+    let ws: WebSocket;
     try { ws = new WebSocket(buildWsUrl()); } catch (e) {
       this._setStatus('error');
-      if (this.el.parentNode) this._showOverlay('error', 'Connection failed', e.message);
+      if (this.el.parentNode) this._showOverlay('error', 'Connection failed', (e as Error).message);
       return;
     }
     this.ws = ws;
 
-    ws.onmessage = (ev) => {
+    ws.onmessage = (ev: MessageEvent) => {
       const d = ev.data;
       if (typeof d === 'string' && d.charCodeAt(0) === 123) {
         try {
@@ -388,33 +454,29 @@ class TerminalSession {
             return;
           }
           if (m.type === 'pong') return;
-        } catch {}
+        } catch { /* ignore */ }
       }
       this.terminal.write(d instanceof ArrayBuffer ? new Uint8Array(d) : d);
     };
 
     ws.onclose = () => {
-      clearInterval(this._pingInterval);
+      if (this._pingInterval) clearInterval(this._pingInterval);
       if (this._destroyed || this.ws !== ws) return;
       this._setStatus('disconnected');
       this._needsReconnect = true;
-      if (this.el.parentNode) {
-        this._showOverlay('disconnected', 'Disconnected', 'Connection lost');
-      }
+      if (this.el.parentNode) this._showOverlay('disconnected', 'Disconnected', 'Connection lost');
     };
 
     ws.onerror = () => {
       if (this._destroyed || this.ws !== ws) return;
       this._setStatus('error');
       this._needsReconnect = true;
-      if (this.el.parentNode) {
-        this._showOverlay('error', 'Connection error', 'Failed to reach terminal server');
-      }
+      if (this.el.parentNode) this._showOverlay('error', 'Connection error', 'Failed to reach terminal server');
     };
   }
 
-  _startPing() {
-    clearInterval(this._pingInterval);
+  private _startPing(): void {
+    if (this._pingInterval) clearInterval(this._pingInterval);
     this._pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'ping' }));
@@ -422,49 +484,32 @@ class TerminalSession {
     }, 25000);
   }
 
-  _scheduleReconnect() {
-    // No-op: we no longer auto-reconnect in the background.
-    // Reconnection happens in show() when the user returns to the tab.
-  }
-
-  _send(data) {
+  private _send(data: string): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'input', data: data }));
+      this.ws.send(JSON.stringify({ type: 'input', data }));
     }
   }
 
-  sendKey(seq) { this._send(seq); this.terminal.focus(); }
+  sendKey(seq: string): void { this._send(seq); this.terminal.focus(); }
 
-  _fit() {
+  private _fit(): void {
     if (!this.fitAddon || this.el.classList.contains('hidden') || !this.el.parentNode) return;
     try {
       this.fitAddon.fit();
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'resize', cols: this.terminal.cols, rows: this.terminal.rows }));
       }
-    } catch {}
+    } catch { /* ignore */ }
   }
 
-  _setStatus(s) { this.status = s; if (this.onChange) this.onChange(this.id, s); }
+  private _setStatus(s: string): void { this.status = s; if (this.onChange) this.onChange(this.id, s); }
 
-  _showOverlay(type, title, sub) {
-    // Build overlay using safe DOM methods (no innerHTML with dynamic data)
+  private _showOverlay(type: string, title: string, sub?: string): void {
     while (this.overlayEl.firstChild) this.overlayEl.removeChild(this.overlayEl.firstChild);
     this.overlayEl.style.display = 'flex';
-
-    if (type === 'connecting') {
-      const spinner = el('div', 'wt-spinner');
-      this.overlayEl.appendChild(spinner);
-    }
-
-    const titleEl = el('div', 'wt-overlay-title', title);
-    this.overlayEl.appendChild(titleEl);
-
-    if (sub) {
-      const subEl = el('div', 'wt-overlay-sub', sub);
-      this.overlayEl.appendChild(subEl);
-    }
-
+    if (type === 'connecting') this.overlayEl.appendChild(el('div', 'wt-spinner'));
+    this.overlayEl.appendChild(el('div', 'wt-overlay-title', title));
+    if (sub) this.overlayEl.appendChild(el('div', 'wt-overlay-sub', sub));
     if (type !== 'connecting') {
       const btn = el('button', 'wt-overlay-btn', 'Reconnect');
       btn.addEventListener('click', () => { this._reconnectAttempts = 0; this._connect(); });
@@ -472,72 +517,69 @@ class TerminalSession {
     }
   }
 
-  _copyText(text) {
+  private _copyText(text: string): void {
     if (!text) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).catch(() => this._fallbackCopy(text));
     } else { this._fallbackCopy(text); }
   }
-  _fallbackCopy(text) {
+
+  private _fallbackCopy(text: string): void {
     const t = document.createElement('textarea');
     t.value = text; t.style.cssText = 'position:fixed;top:-9999px';
     document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t);
   }
 
-  show() {
+  show(): void {
     this.el.classList.remove('hidden');
     if (this.status === 'connected' && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.overlayEl.style.display = 'none';
       setTimeout(() => { this._fit(); this.terminal.focus(); }, 30);
     } else if (this.status === 'connecting' && this.ws) {
-      // Already connecting — don't kill the in-flight WebSocket, just wait
       setTimeout(() => { this._fit(); }, 30);
     } else {
       this._needsReconnect = false;
       this._connect();
     }
   }
-  hide() { this.el.classList.add('hidden'); }
-  clear() { this.terminal.clear(); this.terminal.write('\x1b[2J\x1b[H'); }
-  copySelection() { this._copyText(this.terminal.getSelection()); }
 
-  reconnect() {
-    if (this.ws) { try { this.ws.close(); } catch {} this.ws = null; }
+  hide(): void { this.el.classList.add('hidden'); }
+  clear(): void { this.terminal.clear(); this.terminal.write('\x1b[2J\x1b[H'); }
+  copySelection(): void { this._copyText(this.terminal.getSelection()); }
+
+  reconnect(): void {
+    if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } this.ws = null; }
     this.terminal.clear();
     this._reconnectAttempts = 0;
     this._connect();
   }
 
-  updateFontSize(sz) { this.terminal.options.fontSize = sz; this._fit(); }
-  updateTheme(name) { const t = THEMES[name]; if (t) this.terminal.options.theme = t; }
+  updateFontSize(sz: number): void { this.terminal.options.fontSize = sz; this._fit(); }
+  updateTheme(name: string): void { const t = THEMES[name]; if (t) this.terminal.options.theme = t; }
 
-  detach() {
-    if (this.el.parentNode) this.el.remove();
-  }
+  detach(): void { if (this.el.parentNode) this.el.remove(); }
 
-  attachTo(container) {
+  attachTo(container: HTMLElement): void {
     container.appendChild(this.el);
     setTimeout(() => {
-      try { this.terminal.refresh(0, this.terminal.rows - 1); this._fit(); } catch {}
+      try { this.terminal.refresh(0, this.terminal.rows - 1); this._fit(); } catch { /* ignore */ }
     }, 50);
   }
 
-  destroy() {
-
-
+  destroy(): void {
     this._destroyed = true;
-    clearTimeout(this._reconnectTimer);
-    clearInterval(this._pingInterval);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this._pingInterval) clearInterval(this._pingInterval);
     this._ro.disconnect();
     if (this._dataDisposable) this._dataDisposable.dispose();
-    if (this.ws) { try { this.ws.close(); } catch {} }
-    try { this.terminal.dispose(); } catch {}
+    if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } }
+    try { this.terminal.dispose(); } catch { /* ignore */ }
     this.el.remove();
   }
 }
 
 // ── Module loader (cached) ────────────────────────────────────────────────────
-async function loadModules() {
+async function loadModules(): Promise<XtermModules> {
   if (_G.modules) return _G.modules;
   const results = await Promise.all([
     import(CDN + '/@xterm/xterm@' + XTERM_VER),
@@ -548,21 +590,18 @@ async function loadModules() {
     import(CDN + '/@xterm/addon-unicode11@' + UNICODE11_VER).catch(() => ({ Unicode11Addon: null })),
   ]);
   _G.modules = {
-    Terminal: results[0].Terminal,
-    FitAddon: results[1].FitAddon,
-    WebLinksAddon: results[2].WebLinksAddon,
-    WebglAddon: results[3].WebglAddon,
-    ClipboardAddon: results[4].ClipboardAddon,
-    Unicode11Addon: results[5].Unicode11Addon,
+    Terminal: results[0].Terminal, FitAddon: results[1].FitAddon,
+    WebLinksAddon: results[2].WebLinksAddon, WebglAddon: results[3].WebglAddon,
+    ClipboardAddon: results[4].ClipboardAddon, Unicode11Addon: results[5].Unicode11Addon,
   };
   return _G.modules;
 }
 
 // ── Mount ─────────────────────────────────────────────────────────────────────
-export async function mount(container, api) {
+export async function mount(container: HTMLElement, api: PluginAPI): Promise<void> {
   injectStyles();
 
-  let mods;
+  let mods: XtermModules;
   try {
     mods = await loadModules();
   } catch (err) {
@@ -570,8 +609,8 @@ export async function mount(container, api) {
     errDiv.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#f14c4c;padding:24px;text-align:center;font-family:sans-serif';
     const inner = el('div');
     inner.appendChild(el('div', null, 'Failed to load xterm.js'));
-    inner.firstChild.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px';
-    const detail = el('div', null, err.message);
+    (inner.firstChild as HTMLElement).style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px';
+    const detail = el('div', null, (err as Error).message);
     detail.style.cssText = 'font-size:12px;opacity:.7';
     inner.appendChild(detail);
     errDiv.appendChild(inner);
@@ -580,88 +619,67 @@ export async function mount(container, api) {
   }
 
   if (!_G.prefs) {
-    _G.prefs = loadPrefs();
+    _G.prefs = loadPrefs() as Prefs;
     _G.prefs.theme = _G.prefs.theme || 'VS Dark';
     _G.prefs.fontSize = _G.prefs.fontSize || 14;
   }
   const prefs = _G.prefs;
-  const isLight = () => prefs.theme === 'Light';
+  const isLight = (): boolean => prefs.theme === 'Light';
 
-  // Build DOM
   const root = el('div', 'wt-root' + (isLight() ? ' wt-light' : ''));
   container.appendChild(root);
 
   const toolbar = el('div', 'wt-toolbar');
   root.appendChild(toolbar);
-
   const tabBar = el('div', 'wt-tabs');
   toolbar.appendChild(tabBar);
-
   const newBtn = el('button', 'wt-new-tab', '+');
   newBtn.title = 'New tab';
   toolbar.appendChild(newBtn);
-
   toolbar.appendChild(divider());
 
-  // Settings gear with popover
   const settingsWrap = el('div', 'wt-settings-wrap');
   const gearBtn = svgBtn(IC.gear, 'Settings');
   settingsWrap.appendChild(gearBtn);
-
   const popover = el('div', 'wt-popover');
 
-  // Theme section
   popover.appendChild(el('label', null, 'Theme'));
   const themeSel = document.createElement('select');
   Object.keys(THEMES).forEach(name => {
     const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
+    opt.value = name; opt.textContent = name;
     if (name === prefs.theme) opt.selected = true;
     themeSel.appendChild(opt);
   });
   popover.appendChild(themeSel);
 
-  // Font size section
   popover.appendChild(el('label', null, 'Font Size'));
   const fsRow = el('div', 'wt-fs-row');
   const fsMinus = svgBtn(IC.minus, 'Decrease');
   const fsVal = el('span', null, prefs.fontSize + 'px');
   const fsPlus = svgBtn(IC.plus, 'Increase');
-  fsRow.appendChild(fsMinus);
-  fsRow.appendChild(fsVal);
-  fsRow.appendChild(fsPlus);
+  fsRow.appendChild(fsMinus); fsRow.appendChild(fsVal); fsRow.appendChild(fsPlus);
   popover.appendChild(fsRow);
-
   settingsWrap.appendChild(popover);
   toolbar.appendChild(settingsWrap);
 
-  // Panes
   const panesEl = el('div', 'wt-panes');
   root.appendChild(panesEl);
 
-  // Mobile key bar
   const keybar = el('div', 'wt-keybar');
   root.appendChild(keybar);
 
-  const MOBILE_KEYS = [
-    { label: 'ESC', seq: '\x1b' },
-    { label: 'TAB', seq: '\t' },
-    { label: 'CTRL', modifier: 'ctrl' },
-    { label: 'ALT', modifier: 'alt' },
-    { label: IC.up, seq: '\x1b[A', svg: true },
-    { label: IC.down, seq: '\x1b[B', svg: true },
-    { label: IC.left, seq: '\x1b[D', svg: true },
-    { label: IC.right, seq: '\x1b[C', svg: true },
-    { label: '|', seq: '|' },
-    { label: '~', seq: '~' },
-    { label: '/', seq: '/' },
-    { label: '-', seq: '-' },
-    { label: '_', seq: '_' },
+  const MOBILE_KEYS: MobileKey[] = [
+    { label: 'ESC', seq: '\x1b' }, { label: 'TAB', seq: '\t' },
+    { label: 'CTRL', modifier: 'ctrl' }, { label: 'ALT', modifier: 'alt' },
+    { label: IC.up, seq: '\x1b[A', svg: true }, { label: IC.down, seq: '\x1b[B', svg: true },
+    { label: IC.left, seq: '\x1b[D', svg: true }, { label: IC.right, seq: '\x1b[C', svg: true },
+    { label: '|', seq: '|' }, { label: '~', seq: '~' }, { label: '/', seq: '/' },
+    { label: '-', seq: '-' }, { label: '_', seq: '_' },
   ];
 
   let ctrlActive = false, altActive = false;
-  let ctrlKeyEl = null, altKeyEl = null;
+  let ctrlKeyEl: HTMLElement | null = null, altKeyEl: HTMLElement | null = null;
 
   MOBILE_KEYS.forEach(k => {
     const btn = el('button', 'wt-key');
@@ -676,22 +694,20 @@ export async function mount(container, api) {
     if (k.modifier === 'ctrl') {
       ctrlKeyEl = btn;
       btn.addEventListener('click', () => {
-        ctrlActive = !ctrlActive;
-        btn.classList.toggle('active', ctrlActive);
+        ctrlActive = !ctrlActive; btn.classList.toggle('active', ctrlActive);
         activeSession()?.terminal.focus();
       });
     } else if (k.modifier === 'alt') {
       altKeyEl = btn;
       btn.addEventListener('click', () => {
-        altActive = !altActive;
-        btn.classList.toggle('active', altActive);
+        altActive = !altActive; btn.classList.toggle('active', altActive);
         activeSession()?.terminal.focus();
       });
     } else {
       btn.addEventListener('click', () => {
         const sess = activeSession();
         if (!sess) return;
-        let seq = k.seq;
+        let seq = k.seq!;
         if (ctrlActive && seq.length === 1) {
           const code = seq.toLowerCase().charCodeAt(0);
           if (code >= 97 && code <= 122) seq = String.fromCharCode(code - 96);
@@ -709,30 +725,26 @@ export async function mount(container, api) {
     keybar.appendChild(btn);
   });
 
-  function activeSession() { return _G.sessions.get(_G.activeId); }
+  function activeSession(): TerminalSession | undefined { return _G.sessions.get(_G.activeId!); }
 
-  // Tab rendering
-  function renderTabs() {
+  function renderTabs(): void {
     while (tabBar.firstChild) tabBar.removeChild(tabBar.firstChild);
     for (const [id, sess] of _G.sessions) {
       const tab = el('div', 'wt-tab' + (id === _G.activeId ? ' active' : ''));
       const dot = el('div', 'wt-tab-dot' + (sess.status !== 'connected' ? ' off' : ''));
       const lbl = el('span', null, sess.label);
       const closeEl = el('button', 'wt-tab-close');
-      closeEl.textContent = '\u00d7';
-      closeEl.title = 'Close';
+      closeEl.textContent = '\u00d7'; closeEl.title = 'Close';
       closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(id); });
-      tab.appendChild(dot);
-      tab.appendChild(lbl);
-      tab.appendChild(closeEl);
+      tab.appendChild(dot); tab.appendChild(lbl); tab.appendChild(closeEl);
       tab.addEventListener('click', () => activateTab(id));
       tabBar.appendChild(tab);
     }
   }
 
-  function activateTab(id) {
+  function activateTab(id: string): void {
     if (_G.activeId === id) return;
-    const prev = _G.sessions.get(_G.activeId);
+    const prev = _G.sessions.get(_G.activeId!);
     if (prev) prev.hide();
     _G.activeId = id;
     const sess = _G.sessions.get(id);
@@ -740,20 +752,15 @@ export async function mount(container, api) {
     renderTabs();
   }
 
-  function createTab() {
+  function createTab(): void {
     _G.tabCounter++;
     const id = 't' + _G.tabCounter;
     const sess = new TerminalSession({
-      id: id,
-      label: 'shell ' + _G.tabCounter,
-      Terminal: mods.Terminal,
-      FitAddon: mods.FitAddon,
-      WebLinksAddon: mods.WebLinksAddon,
-      WebglAddon: mods.WebglAddon,
-      ClipboardAddon: mods.ClipboardAddon,
-      Unicode11Addon: mods.Unicode11Addon,
-      prefs: prefs,
-      onChange: function() { renderTabs(); },
+      id, label: 'shell ' + _G.tabCounter,
+      Terminal: mods.Terminal, FitAddon: mods.FitAddon,
+      WebLinksAddon: mods.WebLinksAddon, WebglAddon: mods.WebglAddon,
+      ClipboardAddon: mods.ClipboardAddon, Unicode11Addon: mods.Unicode11Addon,
+      prefs, onChange() { renderTabs(); },
     });
     _G.sessions.set(id, sess);
     sess.attachTo(panesEl);
@@ -761,17 +768,15 @@ export async function mount(container, api) {
     renderTabs();
   }
 
-  function closeTab(id) {
+  function closeTab(id: string): void {
     const sess = _G.sessions.get(id);
     if (!sess) return;
-    sess.destroy();
-    _G.sessions.delete(id);
+    sess.destroy(); _G.sessions.delete(id);
     if (_G.sessions.size === 0) { _G.activeId = null; createTab(); return; }
-    if (_G.activeId === id) activateTab([..._G.sessions.keys()].pop());
+    if (_G.activeId === id) activateTab([..._G.sessions.keys()].pop()!);
     renderTabs();
   }
 
-  // Reattach existing sessions or create first tab
   if (_G.sessions.size > 0) {
     for (const sess of _G.sessions.values()) {
       sess.attachTo(panesEl);
@@ -783,50 +788,42 @@ export async function mount(container, api) {
     createTab();
   }
 
-  // Events
   newBtn.addEventListener('click', createTab);
 
   let popoverOpen = false;
   gearBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    popoverOpen = !popoverOpen;
+    e.stopPropagation(); popoverOpen = !popoverOpen;
     popover.classList.toggle('open', popoverOpen);
   });
-  const closePopover = () => { popoverOpen = false; popover.classList.remove('open'); };
+  const closePopover = (): void => { popoverOpen = false; popover.classList.remove('open'); };
   document.addEventListener('click', closePopover);
   popover.addEventListener('click', (e) => e.stopPropagation());
 
   themeSel.addEventListener('change', () => {
-    prefs.theme = themeSel.value;
-    savePrefs(prefs);
+    prefs.theme = themeSel.value; savePrefs(prefs);
     root.classList.toggle('wt-light', isLight());
     for (const s of _G.sessions.values()) s.updateTheme(prefs.theme);
   });
   fsMinus.addEventListener('click', () => {
     prefs.fontSize = Math.max(8, prefs.fontSize - 1);
-    fsVal.textContent = prefs.fontSize + 'px';
-    savePrefs(prefs);
+    fsVal.textContent = prefs.fontSize + 'px'; savePrefs(prefs);
     for (const s of _G.sessions.values()) s.updateFontSize(prefs.fontSize);
   });
   fsPlus.addEventListener('click', () => {
     prefs.fontSize = Math.min(32, prefs.fontSize + 1);
-    fsVal.textContent = prefs.fontSize + 'px';
-    savePrefs(prefs);
+    fsVal.textContent = prefs.fontSize + 'px'; savePrefs(prefs);
     for (const s of _G.sessions.values()) s.updateFontSize(prefs.fontSize);
   });
 
-  const onKey = (e) => {
+  const onKey = (e: KeyboardEvent): void => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
-      e.preventDefault();
-      createTab();
+      e.preventDefault(); createTab();
     }
   };
   document.addEventListener('keydown', onKey);
-
   const unsubCtx = api.onContextChange ? api.onContextChange(() => {}) : null;
 
-  // Cleanup preserves sessions
-  container._wtCleanup = () => {
+  (container as any)._wtCleanup = () => {
     document.removeEventListener('keydown', onKey);
     document.removeEventListener('click', closePopover);
     if (unsubCtx) unsubCtx();
@@ -835,9 +832,9 @@ export async function mount(container, api) {
   };
 }
 
-export function unmount(container) {
-  if (container._wtCleanup) {
-    container._wtCleanup();
-    delete container._wtCleanup;
+export function unmount(container: HTMLElement): void {
+  if ((container as any)._wtCleanup) {
+    (container as any)._wtCleanup();
+    delete (container as any)._wtCleanup;
   }
 }

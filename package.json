@@ -1,10 +1,20 @@
 {
-  "name": "web-terminal",
+  "name": "cloudcli-plugin-terminal",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "description": "Full-featured web terminal plugin for CloudCLI UI",
-  "main": "server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
   "dependencies": {
     "node-pty": "^1.1.0",
     "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0"
   }
 }
