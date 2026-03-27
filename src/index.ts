@@ -293,6 +293,7 @@ const IC: Record<string, string> = {
   down: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>',
   left: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4l-4 4 4 4"/></svg>',
   right: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>',
+  paste: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="8" height="11" rx="1"/><path d="M3 12V3a1 1 0 011-1h5"/><path d="M8 6h3M8 8.5h3M8 11h2"/></svg>',
 };
 
 // ── WebSocket URL ─────────────────────────────────────────────────────────────
@@ -675,6 +676,7 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
   root.appendChild(keybar);
 
   const MOBILE_KEYS: MobileKey[] = [
+    { label: IC.paste, seq: '__paste__', svg: true },
     { label: 'ESC', seq: '\x1b' }, { label: 'TAB', seq: '\t' },
     { label: 'CTRL', modifier: 'ctrl' }, { label: 'ALT', modifier: 'alt' },
     { label: IC.up, seq: '\x1b[A', svg: true }, { label: IC.down, seq: '\x1b[B', svg: true },
@@ -707,6 +709,14 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
       btn.addEventListener('click', () => {
         altActive = !altActive; btn.classList.toggle('active', altActive);
         activeSession()?.terminal.focus();
+      });
+    } else if (k.seq === '__paste__') {
+      btn.addEventListener('click', () => {
+        const sess = activeSession();
+        if (!sess) return;
+        navigator.clipboard?.readText?.().then((t: string) => {
+          if (t) sess.sendKey(t);
+        }).catch(() => {});
       });
     } else {
       btn.addEventListener('click', () => {
