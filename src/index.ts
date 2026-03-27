@@ -422,10 +422,15 @@ class TerminalSession {
       if (this.el.parentNode) this._showOverlay('error', 'Connection failed', (e as Error).message);
       return;
     }
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onmessage = (ev: MessageEvent) => {
-      const d = ev.data;
+      let d = ev.data;
+      // Decode binary frames to text (happens when behind reverse proxies)
+      if (d instanceof ArrayBuffer) {
+        d = new TextDecoder().decode(d);
+      }
       if (typeof d === 'string' && d.charCodeAt(0) === 123) {
         try {
           const m = JSON.parse(d);
@@ -456,7 +461,7 @@ class TerminalSession {
           if (m.type === 'pong') return;
         } catch { /* ignore */ }
       }
-      this.terminal.write(d instanceof ArrayBuffer ? new Uint8Array(d) : d);
+      this.terminal.write(typeof d === 'string' ? d : new Uint8Array(d));
     };
 
     ws.onclose = () => {

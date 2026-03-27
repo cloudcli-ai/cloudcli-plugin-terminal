@@ -1,7 +1,7 @@
 {
   "name": "web-terminal",
   "displayName": "Terminal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Full-featured web terminal with multi-tab support, powered by xterm.js",
   "author": "CloudCLI UI",
   "icon": "icon.svg",
