@@ -86,7 +86,19 @@ let sessionCounter = 0;
 
 function getShell(): string {
   if (process.platform === 'win32') return 'powershell.exe';
-  return process.env.SHELL || '/bin/bash';
+  if (process.platform !== 'darwin') return process.env.SHELL || '/bin/bash';
+
+  const envShell = process.env.SHELL;
+  if (envShell && envShell !== '/bin/bash') return envShell;
+
+  try {
+    const loginShell = os.userInfo().shell;
+    if (loginShell) return loginShell;
+  } catch {
+    /* fall back to inherited env */
+  }
+
+  return envShell || '/bin/bash';
 }
 
 function safeSend(ws: any, obj: unknown): void {
@@ -127,7 +139,13 @@ wss.on('connection', (ws: any) => {
       cols: 80,
       rows: 24,
       cwd,
-      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'web-terminal' },
+      env: {
+        ...process.env,
+        SHELL: shell,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        TERM_PROGRAM: 'web-terminal',
+      },
     });
   } catch (err) {
     safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
