@@ -44,8 +44,12 @@ interface WsMessage {
 
 // ── Module finder ─────────────────────────────────────────────────────────────
 
-function findModule(name: string): any {
-  try { return require(name); } catch { /* continue */ }
+function findModuleRoot(name: string): string {
+  try {
+    return path.dirname(require.resolve(`${name}/package.json`));
+  } catch {
+    /* continue */
+  }
 
   const roots = [
     path.join('/opt', 'claudecodeui', 'node_modules', name),
@@ -55,23 +59,28 @@ function findModule(name: string): any {
   ];
 
   for (const p of roots) {
-    if (fs.existsSync(p)) {
-      try { return require(p); } catch { /* continue */ }
-    }
+    if (fs.existsSync(p)) return p;
   }
 
   let dir = __dirname;
   for (let i = 0; i < 10; i++) {
     const candidate = path.join(dir, 'node_modules', name);
-    if (fs.existsSync(candidate)) {
-      try { return require(candidate); } catch { /* continue */ }
-    }
+    if (fs.existsSync(candidate)) return candidate;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 
-  throw new Error(`[web-terminal] Cannot find module '${name}' - run npm install in ${__dirname}`);
+  throw new Error(`[web-terminal] Cannot find module root for '${name}' - run npm install in ${__dirname}`);
+}
+
+function findModule(name: string): any {
+  const moduleRoot = findModuleRoot(name);
+  try {
+    return require(moduleRoot);
+  } catch {
+    throw new Error(`[web-terminal] Cannot load module '${name}' from ${moduleRoot}`);
+  }
 }
 
 // ── Dependencies ──────────────────────────────────────────────────────────────
@@ -83,6 +92,26 @@ const { WebSocketServer, WebSocket } = findModule('ws') as WsModule;
 
 const sessions = new Map<string, SessionEntry>();
 let sessionCounter = 0;
+
+function ensureSpawnHelperExecutable(): void {
+  if (process.platform !== 'darwin') return;
+
+  try {
+    const archDir = process.arch === 'arm64' ? 'darwin-arm64' : process.arch === 'x64' ? 'darwin-x64' : null;
+    if (!archDir) return;
+
+    const nodePtyRoot = findModuleRoot('node-pty');
+    const spawnHelperPath = path.join(nodePtyRoot, 'prebuilds', archDir, 'spawn-helper');
+    if (!fs.existsSync(spawnHelperPath)) return;
+
+    const mode = fs.statSync(spawnHelperPath).mode & 0o777;
+    if ((mode & 0o100) === 0) {
+      fs.chmodSync(spawnHelperPath, mode | 0o100);
+    }
+  } catch (err) {
+    console.warn('[web-terminal] Failed to ensure spawn-helper permissions:', (err as Error).message);
+  }
+}
 
 function getShell(): string {
   if (process.platform === 'win32') return 'powershell.exe';
@@ -122,6 +151,7 @@ wss.on('connection', (ws: any) => {
 
   let ptyProc: PtyProcess;
   try {
+    ensureSpawnHelperExecutable();
     ptyProc = pty.spawn(shell, [], {
       name: 'xterm-256color',
       cols: 80,
