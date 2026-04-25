@@ -301,7 +301,8 @@ function buildWsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const token = localStorage.getItem('auth-token') || '';
   const qs = token ? '?token=' + encodeURIComponent(token) : '';
-  return proto + '//' + location.host + '/plugin-ws/web-terminal' + qs;
+  const basePath = (window as any).__CLOUDCLI_BASE_PATH__ || '';
+  return proto + '//' + location.host + basePath + '/plugin-ws/web-terminal' + qs;
 }
 
 // ── Terminal session ──────────────────────────────────────────────────────────
