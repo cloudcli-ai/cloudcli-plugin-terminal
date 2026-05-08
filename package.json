@@ -5,16 +5,23 @@
   "type": "module",
   "description": "Full-featured web terminal plugin for CloudCLI UI",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc -p tsconfig.server.json && esbuild src/index.ts --bundle --format=esm --outfile=dist/index.js --loader:.css=text",
+    "dev": "tsc -p tsconfig.server.json --watch"
   },
   "dependencies": {
+    "@xterm/addon-clipboard": "^0.2.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
     "ws": "^8.14.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
     "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.5.0"
   }
 }

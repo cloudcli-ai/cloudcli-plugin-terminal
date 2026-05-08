@@ -6,15 +6,13 @@
  */
 
 import type { PluginAPI } from './types.js';
-
-// ── CDN version pins ──────────────────────────────────────────────────────────
-const CDN = 'https://esm.sh';
-const XTERM_VER     = '5.5.0';
-const FIT_VER       = '0.10.0';
-const WEBLINKS_VER  = '0.11.0';
-const WEBGL_VER     = '0.18.0';
-const CLIPBOARD_VER = '0.1.0';
-const UNICODE11_VER = '0.8.0';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import xtermCSS from '@xterm/xterm/css/xterm.css';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -37,17 +35,7 @@ interface Prefs {
   fontFamily?: string;
 }
 
-interface XtermModules {
-  Terminal: any;
-  FitAddon: any;
-  WebLinksAddon: any;
-  WebglAddon: any;
-  ClipboardAddon: any;
-  Unicode11Addon: any;
-}
-
 interface GlobalState {
-  modules: XtermModules | null;
   sessions: Map<string, TerminalSession>;
   prefs: Prefs | null;
   tabCounter: number;
@@ -123,7 +111,7 @@ declare global {
 }
 
 if (!window.__wtState) {
-  window.__wtState = { modules: null, sessions: new Map(), prefs: null, tabCounter: 0, activeId: null };
+  window.__wtState = { sessions: new Map(), prefs: null, tabCounter: 0, activeId: null };
 }
 const _G: GlobalState = window.__wtState;
 
@@ -150,10 +138,10 @@ function divider(): HTMLElement { return el('div', 'wt-divider'); }
 function injectStyles(): void {
   if (document.getElementById('wt-css')) return;
 
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = `${CDN}/@xterm/xterm@${XTERM_VER}/css/xterm.css`;
-  document.head.appendChild(link);
+  const xtermStyle = document.createElement('style');
+  xtermStyle.id = 'wt-xterm-css';
+  xtermStyle.textContent = xtermCSS;
+  document.head.appendChild(xtermStyle);
 
   const s = document.createElement('style');
   s.id = 'wt-css';
@@ -584,45 +572,14 @@ class TerminalSession {
   }
 }
 
-// ── Module loader (cached) ────────────────────────────────────────────────────
-async function loadModules(): Promise<XtermModules> {
-  if (_G.modules) return _G.modules;
-  const results = await Promise.all([
-    import(CDN + '/@xterm/xterm@' + XTERM_VER),
-    import(CDN + '/@xterm/addon-fit@' + FIT_VER),
-    import(CDN + '/@xterm/addon-web-links@' + WEBLINKS_VER),
-    import(CDN + '/@xterm/addon-webgl@' + WEBGL_VER),
-    import(CDN + '/@xterm/addon-clipboard@' + CLIPBOARD_VER).catch(() => ({ ClipboardAddon: null })),
-    import(CDN + '/@xterm/addon-unicode11@' + UNICODE11_VER).catch(() => ({ Unicode11Addon: null })),
-  ]);
-  _G.modules = {
-    Terminal: results[0].Terminal, FitAddon: results[1].FitAddon,
-    WebLinksAddon: results[2].WebLinksAddon, WebglAddon: results[3].WebglAddon,
-    ClipboardAddon: results[4].ClipboardAddon, Unicode11Addon: results[5].Unicode11Addon,
-  };
-  return _G.modules;
-}
-
 // ── Mount ─────────────────────────────────────────────────────────────────────
 export async function mount(container: HTMLElement, api: PluginAPI): Promise<void> {
   injectStyles();
 
-  let mods: XtermModules;
-  try {
-    mods = await loadModules();
-  } catch (err) {
-    const errDiv = el('div');
-    errDiv.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#f14c4c;padding:24px;text-align:center;font-family:sans-serif';
-    const inner = el('div');
-    inner.appendChild(el('div', null, 'Failed to load xterm.js'));
-    (inner.firstChild as HTMLElement).style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px';
-    const detail = el('div', null, (err as Error).message);
-    detail.style.cssText = 'font-size:12px;opacity:.7';
-    inner.appendChild(detail);
-    errDiv.appendChild(inner);
-    container.appendChild(errDiv);
-    return;
-  }
+  let Clipboard: any = ClipboardAddon;
+  try { if (!Clipboard) throw new Error(); } catch { Clipboard = null; }
+  let Unicode11: any = Unicode11Addon;
+  try { if (!Unicode11) throw new Error(); } catch { Unicode11 = null; }
 
   if (!_G.prefs) {
     _G.prefs = loadPrefs() as Prefs;
@@ -772,9 +729,8 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
     const id = 't' + _G.tabCounter;
     const sess = new TerminalSession({
       id, label: 'shell ' + _G.tabCounter,
-      Terminal: mods.Terminal, FitAddon: mods.FitAddon,
-      WebLinksAddon: mods.WebLinksAddon, WebglAddon: mods.WebglAddon,
-      ClipboardAddon: mods.ClipboardAddon, Unicode11Addon: mods.Unicode11Addon,
+      Terminal, FitAddon, WebLinksAddon, WebglAddon,
+      ClipboardAddon: Clipboard, Unicode11Addon: Unicode11,
       prefs, onChange() { renderTabs(); },
     });
     _G.sessions.set(id, sess);
