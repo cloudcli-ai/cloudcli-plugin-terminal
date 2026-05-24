@@ -62,3 +62,29 @@ xterm.js and its addons are loaded at runtime from CDN — no frontend build ste
 ## License
 
 MIT
+
+## Session persistence (tmux / dtach)
+
+Set `WEB_TERMINAL_SESSION_BACKEND` on the CloudCLI host to keep shells alive across browser refreshes:
+
+| `WEB_TERMINAL_SESSION_BACKEND` | Behavior |
+|---|---|
+| `none` (default) | One shell per WebSocket. Browser refresh ends the shell with SIGHUP. |
+| `tmux` | Shell runs inside `tmux new-session -A -s <name>`. Refresh reattaches the existing session. Requires `tmux` on `PATH`. |
+| `dtach` | Shell runs inside `dtach -A <socket> -z`. Lighter than tmux; same survival semantics. Requires `dtach` on `PATH`. |
+
+Companion env vars:
+
+- `WEB_TERMINAL_SESSION_NAME` — tmux session name or dtach socket basename. Default `main`.
+- `WEB_TERMINAL_DTACH_SOCKET` — full path for dtach socket. Default `/tmp/web-terminal-<name>.sock`.
+
+Example:
+
+```bash
+WEB_TERMINAL_SESSION_BACKEND=tmux \
+WEB_TERMINAL_SESSION_NAME=main \
+node /path/to/cloudcli/server.js
+```
+
+The single `main` session is shared across browser windows, so reopening the page reattaches the same shell with full scrollback intact. For per-tab persistence, run multiple CloudCLI hosts or open an issue describing the use case.
+

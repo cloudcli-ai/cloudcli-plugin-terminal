@@ -16,7 +16,7 @@ interface PtyProcess {
   kill(): void;
   pause(): void;
   resume(): void;
-  onData(callback: (data: string) => void): void;
+  onData(callback: (data: string | Buffer) => void): void;
   onExit(callback: (event: { exitCode: number; signal?: number }) => void): void;
   spawn(shell: string, args: string[], opts: any): PtyProcess;
 }
@@ -89,6 +89,29 @@ function getShell(): string {
   return process.env.SHELL || '/bin/bash';
 }
 
+// Session persistence wrapper. When WEB_TERMINAL_SESSION_BACKEND=tmux|dtach,
+// the shell is launched inside a detachable multiplexer so WebSocket close
+// (browser refresh, network blip) does not SIGHUP the running program.
+function buildShellCommand(): { command: string; args: string[] } {
+  const shell = getShell();
+  if (process.platform === 'win32') return { command: shell, args: [] };
+
+  const backend = (process.env.WEB_TERMINAL_SESSION_BACKEND || 'none').toLowerCase();
+  const sessionName = process.env.WEB_TERMINAL_SESSION_NAME || 'main';
+
+  if (backend === 'tmux') {
+    return {
+      command: 'tmux',
+      args: ['-L', 'web', '-u', 'new-session', '-A', '-s', sessionName, shell, '-l'],
+    };
+  }
+  if (backend === 'dtach') {
+    const socket = process.env.WEB_TERMINAL_DTACH_SOCKET || `/tmp/web-terminal-${sessionName}.sock`;
+    return { command: 'dtach', args: ['-A', socket, '-z', shell, '-l'] };
+  }
+  return { command: shell, args: [] };
+}
+
 function safeSend(ws: any, obj: unknown): void {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(typeof obj === 'string' ? obj : JSON.stringify(obj));
@@ -118,16 +141,18 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws: any) => {
   const sessionId = `s${++sessionCounter}`;
   const cwd = process.env.HOME || os.homedir();
-  const shell = getShell();
+  const { command, args } = buildShellCommand();
+  const shell = command;
 
   let ptyProc: PtyProcess;
   try {
-    ptyProc = pty.spawn(shell, [], {
+    ptyProc = pty.spawn(command, args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
       cwd,
       env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'web-terminal' },
+      encoding: null,
     });
   } catch (err) {
     safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
@@ -138,10 +163,20 @@ wss.on('connection', (ws: any) => {
   sessions.set(sessionId, { pty: ptyProc, ws });
   safeSend(ws, { type: 'ready', sessionId, shell, cwd });
 
-  ptyProc.onData((chunk: string) => {
+  // Streaming UTF-8 decode: node-pty emits raw Buffer chunks, but a multi-byte
+  // codepoint can land split across two chunks. TextDecoder with {stream:true}
+  // buffers trailing incomplete bytes until the next call, so the string we
+  // forward over the WebSocket always contains only complete codepoints. This
+  // eliminates the "smeared border / wrong-width character" glitch that
+  // appears when emoji or box-drawing chars cross a chunk boundary.
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  ptyProc.onData((chunk: Buffer | string) => {
     ptyProc.pause();
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    const text = decoder.decode(bytes, { stream: true });
+    if (!text) { ptyProc.resume(); return; }
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(chunk, () => ptyProc.resume());
+      ws.send(text, () => ptyProc.resume());
     } else {
       ptyProc.resume();
     }
