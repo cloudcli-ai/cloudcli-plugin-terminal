@@ -444,7 +444,11 @@ class TerminalSession {
               this.terminal.write('\r\n\x1b[2m--- reconnected ---\x1b[0m\r\n');
             }
             this._hasConnectedBefore = true;
-            setTimeout(() => { this._fit(); this.terminal.focus(); }, 60);
+            setTimeout(() => {
+              this._fit();
+              this.terminal.scrollToBottom();
+              this.terminal.focus();
+            }, 60);
             return;
           }
           if (m.type === 'exit') {
@@ -540,7 +544,11 @@ class TerminalSession {
     this.el.classList.remove('hidden');
     if (this.status === 'connected' && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.overlayEl.style.display = 'none';
-      setTimeout(() => { this._fit(); this.terminal.focus(); }, 30);
+      setTimeout(() => {
+        this._fit();
+        this.terminal.scrollToBottom();
+        this.terminal.focus();
+      }, 30);
     } else if (this.status === 'connecting' && this.ws) {
       setTimeout(() => { this._fit(); }, 30);
     } else {
@@ -568,7 +576,11 @@ class TerminalSession {
   attachTo(container: HTMLElement): void {
     container.appendChild(this.el);
     setTimeout(() => {
-      try { this.terminal.refresh(0, this.terminal.rows - 1); this._fit(); } catch { /* ignore */ }
+      try {
+        this.terminal.refresh(0, this.terminal.rows - 1);
+        this._fit();
+        this.terminal.scrollToBottom();
+      } catch { /* ignore */ }
     }, 50);
   }
 
