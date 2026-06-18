@@ -12,6 +12,16 @@ A full-featured terminal plugin for [CloudCLI UI](https://github.com/cloudcli-ai
 - **Unicode 11** — full emoji and wide-character support
 - **Auto-resize** — terminal reflows when the panel is resized
 
+## Rendering Fallback
+
+The terminal uses WebGL by default. If a browser/driver combination renders
+box drawing, emoji, or CJK text as black squares, disable WebGL for that browser
+profile and reopen the terminal:
+
+```js
+localStorage.setItem('web-terminal-disable-webgl', 'true')
+```
+
 ## Installation
 
 **From CloudCLI UI (recommended):**

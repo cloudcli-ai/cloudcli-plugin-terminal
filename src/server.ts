@@ -16,7 +16,7 @@ interface PtyProcess {
   kill(): void;
   pause(): void;
   resume(): void;
-  onData(callback: (data: string) => void): void;
+  onData(callback: (data: string | Buffer) => void): void;
   onExit(callback: (event: { exitCode: number; signal?: number }) => void): void;
   spawn(shell: string, args: string[], opts: any): PtyProcess;
 }
@@ -128,6 +128,7 @@ wss.on('connection', (ws: any) => {
       rows: 24,
       cwd,
       env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'web-terminal' },
+      encoding: null,
     });
   } catch (err) {
     safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
@@ -138,10 +139,20 @@ wss.on('connection', (ws: any) => {
   sessions.set(sessionId, { pty: ptyProc, ws });
   safeSend(ws, { type: 'ready', sessionId, shell, cwd });
 
-  ptyProc.onData((chunk: string) => {
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+
+  ptyProc.onData((chunk: string | Buffer) => {
+    const text = typeof chunk === 'string'
+      ? chunk
+      : decoder.decode(chunk, { stream: true });
+
+    if (!text) {
+      return;
+    }
+
     ptyProc.pause();
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(chunk, () => ptyProc.resume());
+      ws.send(text, () => ptyProc.resume());
     } else {
       ptyProc.resume();
     }
