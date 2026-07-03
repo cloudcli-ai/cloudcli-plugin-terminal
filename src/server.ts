@@ -89,6 +89,43 @@ function getShell(): string {
   return process.env.SHELL || '/bin/bash';
 }
 
+function prioritizeUserNpmGlobalBin(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH';
+  const currentPath = env[pathKey];
+  if (!currentPath) return env;
+
+  const readEnv = (key: string) => {
+    const resolvedKey = Object.keys(env).find((envKey) => envKey.toLowerCase() === key.toLowerCase());
+    return resolvedKey ? env[resolvedKey] : undefined;
+  };
+  const npmPrefix = readEnv('npm_config_prefix');
+  const appData = readEnv('APPDATA');
+  const candidates = [
+    npmPrefix,
+    npmPrefix ? path.join(npmPrefix, 'bin') : undefined,
+    appData ? path.join(appData, 'npm') : undefined,
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm'),
+    path.join(os.homedir(), '.npm-global', 'bin'),
+  ].filter((entry): entry is string => Boolean(entry));
+  const pathEntries = currentPath.split(path.delimiter).filter(Boolean);
+  const normalize = (entry: string) => process.platform === 'win32' ? entry.toLowerCase() : entry;
+  const preferredEntries = candidates.filter((candidate, index) =>
+    candidates.findIndex((entry) => normalize(entry) === normalize(candidate)) === index
+    && pathEntries.some((entry) => normalize(entry) === normalize(candidate))
+  );
+
+  if (preferredEntries.length === 0) return env;
+
+  const preferred = new Set(preferredEntries.map(normalize));
+  return {
+    ...env,
+    [pathKey]: [
+      ...preferredEntries,
+      ...pathEntries.filter((entry) => !preferred.has(normalize(entry))),
+    ].join(path.delimiter),
+  };
+}
+
 function safeSend(ws: any, obj: unknown): void {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(typeof obj === 'string' ? obj : JSON.stringify(obj));
@@ -127,8 +164,15 @@ wss.on('connection', (ws: any) => {
       cols: 80,
       rows: 24,
       cwd,
-      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'web-terminal' },
+
+      env: {
+        ...prioritizeUserNpmGlobalBin(process.env),
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        TERM_PROGRAM: 'web-terminal',
+      },
       encoding: null,
+
     });
   } catch (err) {
     safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
