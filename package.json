@@ -1,6 +1,6 @@
 {
   "name": "cloudcli-plugin-terminal",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "description": "Full-featured web terminal plugin for CloudCLI UI",
