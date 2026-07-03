@@ -114,6 +114,9 @@ const THEMES: Record<string, TerminalTheme> = {
 
 // ── Persistent prefs ──────────────────────────────────────────────────────────
 const PREFS_KEY = 'web-terminal-prefs';
+const WEBGL_DISABLED_KEY = 'web-terminal-disable-webgl';
+const DEFAULT_FONT_FAMILY = '"Cascadia Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Microsoft YaHei", "MS Gothic", Meiryo, "PingFang SC", "Hiragino Sans GB", "Noto Color Emoji", Menlo, Monaco, "Courier New", monospace';
+function isWebglDisabled(): boolean { try { return localStorage.getItem(WEBGL_DISABLED_KEY) === 'true'; } catch { return false; } }
 function loadPrefs(): Partial<Prefs> { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
 function savePrefs(p: Prefs): void { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
 
@@ -353,7 +356,7 @@ class TerminalSession {
     this.terminal = new opts.Terminal({
       cursorBlink: true,
       fontSize: opts.prefs.fontSize || 14,
-      fontFamily: opts.prefs.fontFamily || "Menlo, Monaco, 'Courier New', monospace",
+      fontFamily: opts.prefs.fontFamily || DEFAULT_FONT_FAMILY,
       allowProposedApi: true, convertEol: true, scrollback: 10000,
       tabStopWidth: 4, macOptionIsMeta: true, macOptionClickForcesSelection: true,
       theme: THEMES[opts.prefs.theme || 'VS Dark'],
@@ -368,11 +371,13 @@ class TerminalSession {
 
     this.terminal.open(this.el);
 
-    try {
-      const webgl = new opts.WebglAddon();
-      webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* ignore */ } });
-      this.terminal.loadAddon(webgl);
-    } catch { /* ignore */ }
+    if (!isWebglDisabled()) {
+      try {
+        const webgl = new opts.WebglAddon();
+        webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* ignore */ } });
+        this.terminal.loadAddon(webgl);
+      } catch { /* ignore */ }
+    }
 
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true;
