@@ -40,6 +40,7 @@ interface WsMessage {
   data?: string;
   cols?: number;
   rows?: number;
+  cwd?: string;
 }
 
 // ── Module finder ─────────────────────────────────────────────────────────────
@@ -86,7 +87,15 @@ let sessionCounter = 0;
 
 function getShell(): string {
   if (process.platform === 'win32') return 'powershell.exe';
-  return process.env.SHELL || '/bin/bash';
+  if (process.env.SHELL) return process.env.SHELL;
+  // The plugin server is often spawned without SHELL in its env (e.g. from a GUI
+  // launch context), which would drop the user to a bare /bin/bash with none of
+  // their prompt/colors. Fall back to the login shell from /etc/passwd.
+  try {
+    const loginShell = os.userInfo().shell;
+    if (loginShell) return loginShell;
+  } catch { /* ignore */ }
+  return '/bin/bash';
 }
 
 function prioritizeUserNpmGlobalBin(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -152,76 +161,105 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+// Resolve the requested working directory to a real directory, falling back to
+// the user's home when it's missing, invalid, or not a directory.
+function resolveCwd(requested?: unknown): string {
+  const home = process.env.HOME || os.homedir();
+  if (typeof requested === 'string' && requested.trim()) {
+    try {
+      const abs = path.resolve(requested);
+      if (fs.statSync(abs).isDirectory()) return abs;
+    } catch { /* fall through to home */ }
+  }
+  return home;
+}
+
 wss.on('connection', (ws: any) => {
   const sessionId = `s${++sessionCounter}`;
-  const cwd = process.env.HOME || os.homedir();
   const shell = getShell();
-
-  let ptyProc: PtyProcess;
-  try {
-    ptyProc = pty.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
-      cwd,
-
-      env: {
-        ...prioritizeUserNpmGlobalBin(process.env),
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-        TERM_PROGRAM: 'web-terminal',
-      },
-      encoding: null,
-
-    });
-  } catch (err) {
-    safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
-    ws.close();
-    return;
-  }
-
-  sessions.set(sessionId, { pty: ptyProc, ws });
-  safeSend(ws, { type: 'ready', sessionId, shell, cwd });
-
   const decoder = new TextDecoder('utf-8', { fatal: false });
 
-  ptyProc.onData((chunk: string | Buffer) => {
-    const text = typeof chunk === 'string'
-      ? chunk
-      : decoder.decode(chunk, { stream: true });
+  let ptyProc: PtyProcess | null = null;
+  // The client sends an `init` message with the selected project path right
+  // after connecting, so the shell can start there instead of $HOME. If it
+  // never arrives (older client), spawn in $HOME shortly after connecting.
+  let spawnTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => startShell(), 400);
 
-    if (!text) {
+  function startShell(requestedCwd?: unknown): void {
+    if (ptyProc) return;
+    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
+    const cwd = resolveCwd(requestedCwd);
+
+    let proc: PtyProcess;
+    try {
+      proc = pty.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd,
+        env: {
+          ...prioritizeUserNpmGlobalBin(process.env),
+          TERM: 'xterm-256color',
+          COLORTERM: 'truecolor',
+          TERM_PROGRAM: 'web-terminal',
+        },
+        encoding: null,
+      });
+    } catch (err) {
+      safeSend(ws, { type: 'error', message: `Failed to spawn shell: ${(err as Error).message}` });
+      ws.close();
       return;
     }
 
-    ptyProc.pause();
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(text, () => ptyProc.resume());
-    } else {
-      ptyProc.resume();
-    }
-  });
+    ptyProc = proc;
+    sessions.set(sessionId, { pty: proc, ws });
+    safeSend(ws, { type: 'ready', sessionId, shell, cwd });
 
-  ptyProc.onExit(({ exitCode, signal }) => {
-    sessions.delete(sessionId);
-    safeSend(ws, { type: 'exit', sessionId, exitCode, signal });
-    if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'shell exited');
-  });
+    proc.onData((chunk: string | Buffer) => {
+      const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+      if (!text) return;
+      proc.pause();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(text, () => proc.resume());
+      } else {
+        proc.resume();
+      }
+    });
+
+    proc.onExit(({ exitCode, signal }) => {
+      sessions.delete(sessionId);
+      safeSend(ws, { type: 'exit', sessionId, exitCode, signal });
+      if (ws.readyState === WebSocket.OPEN) ws.close(1000, 'shell exited');
+    });
+  }
 
   ws.on('message', (rawData: Buffer | string) => {
     const text = Buffer.isBuffer(rawData) ? rawData.toString('utf8') : String(rawData);
+
+    let msg: WsMessage | null = null;
     if (text.charCodeAt(0) === 123) {
-      try {
-        const msg: WsMessage = JSON.parse(text);
-        if (msg.type === 'input' && typeof msg.data === 'string') { ptyProc.write(msg.data); return; }
-        if (msg.type === 'resize') { ptyProc.resize(Math.max(1, Math.min(Number(msg.cols) || 80, 500)), Math.max(1, Math.min(Number(msg.rows) || 24, 200))); return; }
-        if (msg.type === 'ping') { safeSend(ws, { type: 'pong', sessionId }); return; }
-      } catch { /* fall through */ }
+      try { msg = JSON.parse(text) as WsMessage; } catch { msg = null; }
+    }
+
+    if (msg && msg.type === 'init') { startShell(msg.cwd); return; }
+
+    // Any traffic before an init message starts the shell in $HOME.
+    if (!ptyProc) startShell();
+    if (!ptyProc) return; // spawn failed
+
+    if (msg) {
+      if (msg.type === 'input' && typeof msg.data === 'string') { ptyProc.write(msg.data); return; }
+      if (msg.type === 'resize') { ptyProc.resize(Math.max(1, Math.min(Number(msg.cols) || 80, 500)), Math.max(1, Math.min(Number(msg.rows) || 24, 200))); return; }
+      if (msg.type === 'ping') { safeSend(ws, { type: 'pong', sessionId }); return; }
     }
     ptyProc.write(text);
   });
 
-  ws.on('close', () => { sessions.delete(sessionId); try { ptyProc.kill(); } catch { /* ignore */ } });
+  ws.on('close', () => {
+    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
+    sessions.delete(sessionId);
+    if (ptyProc) { try { ptyProc.kill(); } catch { /* ignore */ } }
+  });
   ws.on('error', (err: Error) => { console.error(`[web-terminal] ${sessionId} error:`, err.message); });
 });
 
