@@ -74,9 +74,60 @@ function findModule(name: string): any {
   throw new Error(`[web-terminal] Cannot find module '${name}' - run npm install in ${__dirname}`);
 }
 
+// ── Native helper permissions ───────────────────────────────────────────────────
+// Some plugin bundles are unpacked in a way that drops the execute bit on
+// node-pty's `spawn-helper` binary. Without it, pty.spawn() fails on macOS and
+// Linux with "posix_spawnp failed". Restore the bit defensively at startup so the
+// terminal works regardless of how the plugin was distributed.
+
+function ensureSpawnHelperExecutable(): void {
+  if (process.platform === 'win32') return;
+
+  let entry: string;
+  try {
+    entry = require.resolve('node-pty');
+  } catch {
+    return;
+  }
+
+  // Walk up to the node-pty package root (the directory holding prebuilds/ or build/).
+  let root = path.dirname(entry);
+  for (let i = 0; i < 12; i++) {
+    if (fs.existsSync(path.join(root, 'prebuilds')) || fs.existsSync(path.join(root, 'build'))) break;
+    const parent = path.dirname(root);
+    if (parent === root) return;
+    root = parent;
+  }
+
+  const helpers: string[] = [];
+  const buildHelper = path.join(root, 'build', 'Release', 'spawn-helper');
+  if (fs.existsSync(buildHelper)) helpers.push(buildHelper);
+  const prebuildsDir = path.join(root, 'prebuilds');
+  if (fs.existsSync(prebuildsDir)) {
+    for (const sub of fs.readdirSync(prebuildsDir)) {
+      const helper = path.join(prebuildsDir, sub, 'spawn-helper');
+      if (fs.existsSync(helper)) helpers.push(helper);
+    }
+  }
+
+  for (const helper of helpers) {
+    try {
+      fs.accessSync(helper, fs.constants.X_OK);
+    } catch {
+      try {
+        fs.chmodSync(helper, fs.statSync(helper).mode | 0o111);
+        console.error(`[web-terminal] restored missing execute bit on ${helper}`);
+      } catch (err) {
+        console.error(`[web-terminal] failed to chmod ${helper}: ${(err as Error).message}`);
+      }
+    }
+  }
+}
+
 // ── Dependencies ──────────────────────────────────────────────────────────────
 
 const pty = findModule('node-pty') as PtyModule;
+ensureSpawnHelperExecutable();
 const { WebSocketServer, WebSocket } = findModule('ws') as WsModule;
 
 // ── State ─────────────────────────────────────────────────────────────────────
