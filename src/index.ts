@@ -115,7 +115,7 @@ const THEMES: Record<string, TerminalTheme> = {
 // ── Persistent prefs ──────────────────────────────────────────────────────────
 const PREFS_KEY = 'web-terminal-prefs';
 const WEBGL_DISABLED_KEY = 'web-terminal-disable-webgl';
-const DEFAULT_FONT_FAMILY = '"Cascadia Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Microsoft YaHei", "MS Gothic", Meiryo, "PingFang SC", "Hiragino Sans GB", "Noto Color Emoji", Menlo, Monaco, "Courier New", monospace';
+const DEFAULT_FONT_FAMILY = '"SF Mono", "SFMono-Regular", Menlo, "Cascadia Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Microsoft YaHei", "MS Gothic", Meiryo, "PingFang SC", "Hiragino Sans GB", "Noto Color Emoji", Monaco, "Courier New", monospace';
 function isWebglDisabled(): boolean { try { return localStorage.getItem(WEBGL_DISABLED_KEY) === 'true'; } catch { return false; } }
 function loadPrefs(): Partial<Prefs> { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
 function savePrefs(p: Prefs): void { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
@@ -313,6 +313,7 @@ interface SessionOptions {
   Terminal: any; FitAddon: any; WebLinksAddon: any; WebglAddon: any;
   ClipboardAddon: any; Unicode11Addon: any;
   prefs: Prefs;
+  cwd?: string;
   onChange: (id: string, status: string) => void;
 }
 
@@ -322,6 +323,7 @@ class TerminalSession {
   status: string;
   onChange: (id: string, status: string) => void;
   prefs: Prefs;
+  cwd: string;
   el: HTMLElement;
   overlayEl: HTMLElement;
   terminal: any;
@@ -343,6 +345,7 @@ class TerminalSession {
     this.status = 'connecting';
     this.onChange = opts.onChange;
     this.prefs = opts.prefs;
+    this.cwd = opts.cwd || '';
     this._destroyed = false;
     this._reconnectTimer = null;
     this._reconnectAttempts = 0;
@@ -355,8 +358,15 @@ class TerminalSession {
 
     this.terminal = new opts.Terminal({
       cursorBlink: true,
+      cursorStyle: 'bar',
       fontSize: opts.prefs.fontSize || 14,
       fontFamily: opts.prefs.fontFamily || DEFAULT_FONT_FAMILY,
+      fontWeight: 400,
+      fontWeightBold: 600,
+      lineHeight: 1.2,
+      letterSpacing: 0.4,
+      minimumContrastRatio: 1.1,
+      drawBoldTextInBrightColors: true,
       allowProposedApi: true, convertEol: true, scrollback: 10000,
       tabStopWidth: 4, macOptionIsMeta: true, macOptionClickForcesSelection: true,
       theme: THEMES[opts.prefs.theme || 'VS Dark'],
@@ -430,6 +440,11 @@ class TerminalSession {
     }
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+
+    ws.onopen = () => {
+      // Tell the server where to start the shell (selected project, else $HOME).
+      try { ws.send(JSON.stringify({ type: 'init', cwd: this.cwd || '' })); } catch { /* ignore */ }
+    };
 
     ws.onmessage = (ev: MessageEvent) => {
       let d = ev.data;
@@ -637,6 +652,11 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
   const prefs = _G.prefs;
   const isLight = (): boolean => prefs.theme === 'Light';
 
+  // Working directory for new shells: the selected CloudCLI project, else $HOME
+  // (empty string lets the server pick the home directory). Kept in sync as the
+  // user switches projects; existing tabs keep their original directory.
+  let projectCwd = api.context?.project?.path || '';
+
   const root = el('div', 'wt-root' + (isLight() ? ' wt-light' : ''));
   container.appendChild(root);
 
@@ -780,7 +800,7 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
       Terminal: mods.Terminal, FitAddon: mods.FitAddon,
       WebLinksAddon: mods.WebLinksAddon, WebglAddon: mods.WebglAddon,
       ClipboardAddon: mods.ClipboardAddon, Unicode11Addon: mods.Unicode11Addon,
-      prefs, onChange() { renderTabs(); },
+      prefs, cwd: projectCwd, onChange() { renderTabs(); },
     });
     _G.sessions.set(id, sess);
     sess.attachTo(panesEl);
@@ -841,7 +861,9 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
     }
   };
   document.addEventListener('keydown', onKey);
-  const unsubCtx = api.onContextChange ? api.onContextChange(() => {}) : null;
+  const unsubCtx = api.onContextChange
+    ? api.onContextChange((ctx) => { projectCwd = ctx?.project?.path || ''; })
+    : null;
 
   (container as any)._wtCleanup = () => {
     document.removeEventListener('keydown', onKey);
