@@ -1,20 +1,39 @@
 {
   "name": "cloudcli-plugin-terminal",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Full-featured web terminal plugin for CloudCLI UI",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cloudcli-ai/cloudcli-plugin-terminal"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "dev": "node scripts/build.mjs --watch"
+  },
+  "//dependencies": "Everything `npm run build` needs lives here, not in devDependencies: CloudCLI installs plugins with the host's own environment, and a host running NODE_ENV=production makes npm skip devDependencies entirely — which would leave the build with no bundler and no xterm.",
   "dependencies": {
+    "@xterm/addon-clipboard": "^0.1.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.15.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "esbuild": "^0.25.0",
     "node-pty": "^1.1.0",
-    "ws": "^8.14.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.5.0"
   }
 }

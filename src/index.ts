@@ -1,860 +1,764 @@
 /**
- * web-terminal plugin — full xterm.js terminal with multi-tab support.
+ * web-terminal — a full xterm.js terminal for CloudCLI, with tabs.
  *
- * Sessions persist across mount/unmount (tab switching). WebSocket connections
- * and PTY processes stay alive when the user navigates to other tabs.
+ * The host mounts and unmounts this module every time the user moves between
+ * workspace tabs, and re-imports it from a fresh Blob URL each time, so module
+ * scope is not a safe place to keep anything. Live sessions therefore live on
+ * `window.__wtState` and are re-attached on the next mount; the server keeps
+ * the PTYs themselves, which is what lets a browser reload pick up the same
+ * shells rather than starting new ones.
  */
 
-import type { PluginAPI } from './types.js';
-
-// ── CDN version pins ──────────────────────────────────────────────────────────
-const CDN = 'https://esm.sh';
-const XTERM_VER     = '5.5.0';
-const FIT_VER       = '0.10.0';
-const WEBLINKS_VER  = '0.11.0';
-const WEBGL_VER     = '0.18.0';
-const CLIPBOARD_VER = '0.1.0';
-const UNICODE11_VER = '0.8.0';
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface TerminalTheme {
-  background: string;
-  foreground: string;
-  cursor: string;
-  cursorAccent: string;
-  selectionBackground: string;
-  selectionForeground?: string;
-  black: string; red: string; green: string; yellow: string;
-  blue: string; magenta: string; cyan: string; white: string;
-  brightBlack: string; brightRed: string; brightGreen: string; brightYellow: string;
-  brightBlue: string; brightMagenta: string; brightCyan: string; brightWhite: string;
-}
-
-interface Prefs {
-  theme: string;
-  fontSize: number;
-  fontFamily?: string;
-}
-
-interface XtermModules {
-  Terminal: any;
-  FitAddon: any;
-  WebLinksAddon: any;
-  WebglAddon: any;
-  ClipboardAddon: any;
-  Unicode11Addon: any;
-}
+import type { PluginAPI, PluginContext } from './types.js';
+import { TerminalSession } from './session.js';
+import {
+  loadPrefs, savePrefs, loadStoredTabs, saveStoredTabs,
+  type Prefs, type StoredTab,
+} from './prefs.js';
+import { injectStyles } from './ui/styles.js';
+import { IC } from './ui/icons.js';
+import { THEME_NAMES, isLightTheme, resolveThemeName } from './ui/themes.js';
 
 interface GlobalState {
-  modules: XtermModules | null;
   sessions: Map<string, TerminalSession>;
-  prefs: Prefs | null;
-  tabCounter: number;
   activeId: string | null;
+  tabCounter: number;
+  prefs: Prefs | null;
+  /** Guards against a slow mount finishing after a newer one has started. */
+  mountGen: number;
+  restored: boolean;
 }
 
-interface MobileKey {
-  label: string;
-  seq?: string;
-  modifier?: string;
-  svg?: boolean;
-}
-
-// ── Terminal themes ───────────────────────────────────────────────────────────
-const THEMES: Record<string, TerminalTheme> = {
-  'VS Dark': {
-    background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#ffffff',
-    cursorAccent: '#1e1e1e', selectionBackground: '#264f78',
-    selectionForeground: '#ffffff',
-    black: '#000000', red: '#cd3131', green: '#0dbc79', yellow: '#e5e510',
-    blue: '#2472c8', magenta: '#bc3fbc', cyan: '#11a8cd', white: '#e5e5e5',
-    brightBlack: '#666666', brightRed: '#f14c4c', brightGreen: '#23d18b',
-    brightYellow: '#f5f543', brightBlue: '#3b8eea', brightMagenta: '#d670d6',
-    brightCyan: '#29b8db', brightWhite: '#ffffff',
-  },
-  'One Dark': {
-    background: '#282c34', foreground: '#abb2bf', cursor: '#528bff',
-    cursorAccent: '#282c34', selectionBackground: '#3e4451',
-    selectionForeground: '#abb2bf',
-    black: '#3f4451', red: '#e06c75', green: '#98c379', yellow: '#e5c07b',
-    blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#abb2bf',
-    brightBlack: '#4f5666', brightRed: '#ff7b86', brightGreen: '#a5e075',
-    brightYellow: '#f0d197', brightBlue: '#6db3f2', brightMagenta: '#d886f3',
-    brightCyan: '#4cd1e0', brightWhite: '#ffffff',
-  },
-  'Dracula': {
-    background: '#282a36', foreground: '#f8f8f2', cursor: '#f8f8f2',
-    cursorAccent: '#282a36', selectionBackground: '#44475a',
-    black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
-    blue: '#bd93f9', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
-    brightBlack: '#6272a4', brightRed: '#ff6e6e', brightGreen: '#69ff94',
-    brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df',
-    brightCyan: '#a4ffff', brightWhite: '#ffffff',
-  },
-  'Solarized Dark': {
-    background: '#002b36', foreground: '#839496', cursor: '#839496',
-    cursorAccent: '#002b36', selectionBackground: '#073642',
-    black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900',
-    blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
-    brightBlack: '#586e75', brightRed: '#cb4b16', brightGreen: '#586e75',
-    brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4',
-    brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
-  },
-  'Light': {
-    background: '#ffffff', foreground: '#383a42', cursor: '#383a42',
-    cursorAccent: '#ffffff', selectionBackground: '#e5e5e6',
-    black: '#383a42', red: '#e45649', green: '#50a14f', yellow: '#c18401',
-    blue: '#0184bc', magenta: '#a626a4', cyan: '#0997b3', white: '#fafafa',
-    brightBlack: '#4f525e', brightRed: '#e45649', brightGreen: '#50a14f',
-    brightYellow: '#c18401', brightBlue: '#0184bc', brightMagenta: '#a626a4',
-    brightCyan: '#0997b3', brightWhite: '#ffffff',
-  },
-};
-
-// ── Persistent prefs ──────────────────────────────────────────────────────────
-const PREFS_KEY = 'web-terminal-prefs';
-const WEBGL_DISABLED_KEY = 'web-terminal-disable-webgl';
-const DEFAULT_FONT_FAMILY = '"Cascadia Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Sans Mono CJK JP", "Noto Sans CJK JP", "Microsoft YaHei", "MS Gothic", Meiryo, "PingFang SC", "Hiragino Sans GB", "Noto Color Emoji", Menlo, Monaco, "Courier New", monospace';
-function isWebglDisabled(): boolean { try { return localStorage.getItem(WEBGL_DISABLED_KEY) === 'true'; } catch { return false; } }
-function loadPrefs(): Partial<Prefs> { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
-function savePrefs(p: Prefs): void { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
-
-// ── Global state — stored on window to survive Blob URL re-imports ────────────
 declare global {
   interface Window { __wtState?: GlobalState; }
 }
 
-if (!window.__wtState) {
-  window.__wtState = { modules: null, sessions: new Map(), prefs: null, tabCounter: 0, activeId: null };
-}
-const _G: GlobalState = window.__wtState;
-
-// ── Safe DOM helpers ──────────────────────────────────────────────────────────
-function el(tag: string, cls?: string | null, text?: string): HTMLElement {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text) e.textContent = text;
-  return e;
+function globalState(): GlobalState {
+  if (!window.__wtState) {
+    window.__wtState = {
+      sessions: new Map(), activeId: null, tabCounter: 0,
+      prefs: null, mountGen: 0, restored: false,
+    };
+  }
+  return window.__wtState;
 }
 
-function svgBtn(svgMarkup: string, title?: string): HTMLButtonElement {
-  const b = el('button', 'wt-btn') as HTMLButtonElement;
-  b.title = title || '';
+// ── Small DOM helpers ─────────────────────────────────────────────────────────
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K, className?: string, text?: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  return node;
+}
+
+function iconButton(svg: string, label: string, className = 'wt-btn'): HTMLButtonElement {
+  const button = el('button', className);
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  // Taking focus would dismiss the on-screen keyboard on every tap, which
+  // makes the mobile key bar unusable. Only mousedown is cancelled — touch
+  // devices synthesise mousedown too, and cancelling touchstart instead would
+  // suppress the click entirely and make the button do nothing.
+  button.addEventListener('mousedown', (event) => event.preventDefault());
   const span = el('span');
-  span.innerHTML = svgMarkup; // eslint-disable-line -- trusted constant
-  b.appendChild(span);
-  return b;
+  span.innerHTML = svg; // Constant markup from ui/icons.ts — never user data.
+  button.appendChild(span);
+  return button;
 }
 
-function divider(): HTMLElement { return el('div', 'wt-divider'); }
-
-// ── CSS ───────────────────────────────────────────────────────────────────────
-function injectStyles(): void {
-  if (document.getElementById('wt-css')) return;
-
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = `${CDN}/@xterm/xterm@${XTERM_VER}/css/xterm.css`;
-  document.head.appendChild(link);
-
-  const s = document.createElement('style');
-  s.id = 'wt-css';
-  s.textContent = `
-    .wt-root {
-      display:flex; flex-direction:column; height:100%;
-      background:#1e1e1e; color:#d4d4d4;
-      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-      overflow:hidden;
-      --accent:#4ec9b0; --border:rgba(255,255,255,0.08);
-      --toolbar-bg:rgba(0,0,0,0.3); --tab-bg:rgba(255,255,255,0.05);
-      --tab-active:rgba(255,255,255,0.1); --btn:rgba(255,255,255,0.08);
-      --btn-hover:rgba(255,255,255,0.15);
-    }
-    .wt-root.wt-light {
-      background:#f5f5f5; color:#383a42;
-      --accent:#0184bc; --border:rgba(0,0,0,0.12);
-      --toolbar-bg:rgba(0,0,0,0.06); --tab-bg:rgba(0,0,0,0.04);
-      --tab-active:rgba(0,0,0,0.1); --btn:rgba(0,0,0,0.06);
-      --btn-hover:rgba(0,0,0,0.12);
-    }
-    .wt-toolbar {
-      display:flex; align-items:center; gap:2px;
-      padding:4px 6px; background:var(--toolbar-bg);
-      border-bottom:1px solid var(--border); flex-shrink:0; min-height:36px;
-    }
-    .wt-tabs { display:flex; align-items:center; flex:1; overflow-x:auto; gap:2px; scrollbar-width:none; }
-    .wt-tabs::-webkit-scrollbar { display:none; }
-    .wt-tab {
-      display:flex; align-items:center; gap:5px; padding:4px 8px 4px 10px;
-      border-radius:5px; cursor:pointer; white-space:nowrap;
-      background:var(--tab-bg); font-size:12px; font-weight:500;
-      opacity:.7; transition:background .15s,opacity .15s;
-      user-select:none; border:1px solid transparent; flex-shrink:0;
-    }
-    .wt-tab:hover { opacity:.9; background:var(--tab-active); }
-    .wt-tab.active { background:var(--tab-active); border-color:var(--accent); opacity:1; }
-    .wt-tab-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); flex-shrink:0; }
-    .wt-tab-dot.off { background:#666; }
-    .wt-tab-close {
-      display:flex; align-items:center; justify-content:center;
-      width:16px; height:16px; border-radius:3px; border:none; background:none;
-      color:inherit; cursor:pointer; opacity:.4; font-size:13px; padding:0;
-    }
-    .wt-tab-close:hover { opacity:1; background:rgba(255,70,70,.3); }
-    .wt-btn {
-      display:flex; align-items:center; justify-content:center;
-      height:28px; min-width:28px; padding:0 6px; border-radius:5px;
-      border:none; background:var(--btn); color:inherit; font-size:12px;
-      cursor:pointer; flex-shrink:0; transition:background .15s;
-    }
-    .wt-btn:hover { background:var(--btn-hover); }
-    .wt-btn span { display:flex; align-items:center; }
-    .wt-btn svg { width:14px; height:14px; }
-    .wt-divider { width:1px; height:18px; background:var(--border); margin:0 3px; flex-shrink:0; }
-    .wt-panes { flex:1; position:relative; overflow:hidden; }
-    .wt-pane { position:absolute; inset:0; display:flex; flex-direction:column; overflow:hidden; padding:4px; }
-    .wt-pane.hidden { display:none; }
-    .wt-pane .xterm { height:100%; }
-    .wt-pane .xterm-viewport { overflow-y:auto !important; }
-    .xterm .xterm-screen { outline:none !important; }
-    .wt-overlay {
-      position:absolute; inset:0; display:flex; flex-direction:column;
-      align-items:center; justify-content:center; gap:10px;
-      background:rgba(0,0,0,.6); backdrop-filter:blur(4px);
-      z-index:10; text-align:center; padding:24px;
-    }
-    .wt-overlay-title { font-size:14px; font-weight:600; }
-    .wt-overlay-sub { font-size:12px; opacity:.6; }
-    .wt-overlay-btn {
-      margin-top:6px; padding:7px 18px; border-radius:6px; border:none;
-      background:var(--accent); color:#fff; font-size:13px; cursor:pointer; font-weight:500;
-    }
-    .wt-overlay-btn:hover { filter:brightness(1.15); }
-    .wt-settings-wrap { position:relative; }
-    .wt-popover {
-      position:absolute; top:calc(100% + 6px); right:0; z-index:50;
-      background:#2d2d2d; border:1px solid rgba(255,255,255,.12);
-      border-radius:8px; padding:12px 14px; min-width:180px;
-      box-shadow:0 8px 24px rgba(0,0,0,.4);
-      display:none; flex-direction:column; gap:10px;
-    }
-    .wt-root.wt-light .wt-popover { background:#fff; border-color:rgba(0,0,0,.12); box-shadow:0 8px 24px rgba(0,0,0,.12); }
-    .wt-popover.open { display:flex; }
-    .wt-popover label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; opacity:.5; }
-    .wt-popover select {
-      width:100%; height:28px; padding:0 6px; border-radius:5px;
-      border:1px solid var(--border); background:var(--btn); color:inherit;
-      font-size:12px; cursor:pointer; outline:none;
-    }
-    .wt-popover select:focus { border-color:var(--accent); }
-    .wt-fs-row { display:flex; align-items:center; gap:8px; }
-    .wt-fs-row span { flex:1; text-align:center; font-size:13px; font-weight:500; }
-    .wt-keybar {
-      display:none; flex-shrink:0; overflow-x:auto; flex-wrap:nowrap;
-      gap:4px; padding:5px 6px; background:var(--toolbar-bg);
-      border-top:1px solid var(--border); scrollbar-width:none;
-      -webkit-overflow-scrolling:touch;
-    }
-    .wt-keybar::-webkit-scrollbar { display:none; }
-    .wt-key {
-      flex-shrink:0; height:34px; min-width:38px; padding:0 10px;
-      border-radius:6px; border:1px solid var(--border);
-      background:var(--btn); color:inherit; font-size:12px;
-      font-family:inherit; font-weight:500; cursor:pointer;
-      display:flex; align-items:center; justify-content:center;
-      user-select:none; -webkit-tap-highlight-color:transparent;
-    }
-    .wt-key:active { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .wt-key.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .wt-key svg { width:16px; height:16px; }
-    @media (max-width:768px), (hover:none) and (pointer:coarse) {
-      .wt-keybar { display:flex; }
-      .wt-toolbar { min-height:34px; padding:3px 4px; }
-      .wt-btn { height:26px; min-width:26px; }
-      .wt-tab { font-size:11px; padding:3px 6px 3px 8px; }
-    }
-    @keyframes wt-spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
-    .wt-spinner { width:24px; height:24px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:wt-spin .8s linear infinite; }
-    .wt-new-tab {
-      display:flex; align-items:center; justify-content:center;
-      width:26px; height:26px; border-radius:5px; border:none;
-      background:none; color:inherit; font-size:17px; cursor:pointer;
-      opacity:.5; flex-shrink:0;
-    }
-    .wt-new-tab:hover { opacity:1; background:var(--btn-hover); }
-  `;
-  document.head.appendChild(s);
+function selectField(labelText: string, options: Array<{ value: string; label: string }>, value: string): {
+  wrapper: DocumentFragment; select: HTMLSelectElement;
+} {
+  const wrapper = document.createDocumentFragment();
+  const select = el('select');
+  const id = `wt-${labelText.toLowerCase().replace(/\W+/g, '-')}`;
+  select.id = id;
+  const label = el('label', undefined, labelText);
+  label.htmlFor = id;
+  for (const option of options) {
+    const node = el('option', undefined, option.label);
+    node.value = option.value;
+    if (option.value === value) node.selected = true;
+    select.appendChild(node);
+  }
+  wrapper.appendChild(label);
+  wrapper.appendChild(select);
+  return { wrapper, select };
 }
 
-// ── SVG icon constants ────────────────────────────────────────────────────────
-const IC: Record<string, string> = {
-  gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M6.8 1.5h2.4l.3 1.9 1.1.5 1.5-1 1.7 1.7-1 1.5.5 1.1 1.9.3v2.4l-1.9.3-1.1.5 1 1.5-1.7 1.7-1.5-1-1.1.5-.3 1.9H6.8l-.3-1.9-1.1-.5-1.5 1-1.7-1.7 1-1.5-.5-1.1-1.9-.3V6.1l1.9-.3.5-1.1-1-1.5L4.9 2l1.5 1 1.1-.5z"/><circle cx="8" cy="8" r="2"/></svg>',
-  minus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="8" x2="13" y2="8"/></svg>',
-  plus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>',
-  up: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4-4 4 4"/></svg>',
-  down: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>',
-  left: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4l-4 4 4 4"/></svg>',
-  right: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>',
-  paste: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="8" height="11" rx="1"/><path d="M3 12V3a1 1 0 011-1h5"/><path d="M8 6h3M8 8.5h3M8 11h2"/></svg>',
-};
-
-// ── WebSocket URL ─────────────────────────────────────────────────────────────
-function buildWsUrl(): string {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = localStorage.getItem('auth-token') || '';
-  const qs = token ? '?token=' + encodeURIComponent(token) : '';
-  return proto + '//' + location.host + '/plugin-ws/web-terminal' + qs;
+function checkboxField(labelText: string, checked: boolean): {
+  label: HTMLLabelElement; input: HTMLInputElement;
+} {
+  const label = el('label', 'wt-check');
+  const input = el('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  label.appendChild(input);
+  label.appendChild(document.createTextNode(labelText));
+  return { label, input };
 }
 
-// ── Terminal session ──────────────────────────────────────────────────────────
-interface SessionOptions {
-  id: string; label: string;
-  Terminal: any; FitAddon: any; WebLinksAddon: any; WebglAddon: any;
-  ClipboardAddon: any; Unicode11Addon: any;
-  prefs: Prefs;
-  onChange: (id: string, status: string) => void;
-}
+// ── Mobile key bar ────────────────────────────────────────────────────────────
 
-class TerminalSession {
-  id: string;
+interface KeyDef {
   label: string;
-  status: string;
-  onChange: (id: string, status: string) => void;
-  prefs: Prefs;
-  el: HTMLElement;
-  overlayEl: HTMLElement;
-  terminal: any;
-  fitAddon: any;
-  ws: WebSocket | null;
-
-  private _destroyed: boolean;
-  private _reconnectTimer: ReturnType<typeof setTimeout> | null;
-  private _reconnectAttempts: number;
-  private _pingInterval: ReturnType<typeof setInterval> | null;
-  private _needsReconnect: boolean;
-  private _hasConnectedBefore: boolean;
-  private _dataDisposable: { dispose(): void } | null;
-  private _ro: ResizeObserver;
-
-  constructor(opts: SessionOptions) {
-    this.id = opts.id;
-    this.label = opts.label;
-    this.status = 'connecting';
-    this.onChange = opts.onChange;
-    this.prefs = opts.prefs;
-    this._destroyed = false;
-    this._reconnectTimer = null;
-    this._reconnectAttempts = 0;
-    this._pingInterval = null;
-
-    this.el = el('div', 'wt-pane hidden');
-    this.overlayEl = el('div', 'wt-overlay');
-    this.el.appendChild(this.overlayEl);
-    this._showOverlay('connecting', 'Connecting...', 'Starting shell session');
-
-    this.terminal = new opts.Terminal({
-      cursorBlink: true,
-      fontSize: opts.prefs.fontSize || 14,
-      fontFamily: opts.prefs.fontFamily || DEFAULT_FONT_FAMILY,
-      allowProposedApi: true, convertEol: true, scrollback: 10000,
-      tabStopWidth: 4, macOptionIsMeta: true, macOptionClickForcesSelection: true,
-      theme: THEMES[opts.prefs.theme || 'VS Dark'],
-    });
-
-    this.fitAddon = new opts.FitAddon();
-    this.terminal.loadAddon(this.fitAddon);
-    this.terminal.loadAddon(new opts.WebLinksAddon());
-
-    if (opts.Unicode11Addon) { try { const u = new opts.Unicode11Addon(); this.terminal.loadAddon(u); this.terminal.unicode.activeVersion = '11'; } catch { /* ignore */ } }
-    if (opts.ClipboardAddon) { try { this.terminal.loadAddon(new opts.ClipboardAddon()); } catch { /* ignore */ } }
-
-    this.terminal.open(this.el);
-
-    if (!isWebglDisabled()) {
-      try {
-        const webgl = new opts.WebglAddon();
-        webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* ignore */ } });
-        this.terminal.loadAddon(webgl);
-      } catch { /* ignore */ }
-    }
-
-    this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type !== 'keydown') return true;
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'c' && this.terminal.hasSelection()) {
-        e.preventDefault();
-        this._copyText(this.terminal.getSelection());
-        return false;
-      }
-      if (mod && e.key.toLowerCase() === 'v') {
-        e.preventDefault();
-        navigator.clipboard?.readText?.().then((t: string) => t && this._send(t)).catch(() => {});
-        return false;
-      }
-      return true;
-    });
-
-    this._dataDisposable = this.terminal.onData((d: string) => this._send(d));
-    this._ro = new ResizeObserver(() => this._fit());
-    this._ro.observe(this.el);
-
-    this.ws = null;
-    this._needsReconnect = false;
-    this._hasConnectedBefore = false;
-    this._connect();
-  }
-
-  private _connect(): void {
-    if (this._destroyed) return;
-    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
-    if (this._pingInterval) clearInterval(this._pingInterval);
-
-    if (this.ws) {
-      const old = this.ws;
-      this.ws = null;
-      old.onclose = null; old.onerror = null; old.onmessage = null;
-      try { old.close(); } catch { /* ignore */ }
-    }
-
-    this._setStatus('connecting');
-    if (this.el.parentNode) {
-      this._showOverlay('connecting', 'Connecting...', 'Starting shell session');
-    }
-
-    let ws: WebSocket;
-    try { ws = new WebSocket(buildWsUrl()); } catch (e) {
-      this._setStatus('error');
-      if (this.el.parentNode) this._showOverlay('error', 'Connection failed', (e as Error).message);
-      return;
-    }
-    ws.binaryType = 'arraybuffer';
-    this.ws = ws;
-
-    ws.onmessage = (ev: MessageEvent) => {
-      let d = ev.data;
-      // Decode binary frames to text (happens when behind reverse proxies)
-      if (d instanceof ArrayBuffer) {
-        d = new TextDecoder().decode(d);
-      }
-      if (typeof d === 'string' && d.charCodeAt(0) === 123) {
-        try {
-          const m = JSON.parse(d);
-          if (m.type === 'ready') {
-            this._setStatus('connected');
-            this.overlayEl.style.display = 'none';
-            this._reconnectAttempts = 0;
-            this._startPing();
-            if (this._hasConnectedBefore) {
-              this.terminal.write('\r\n\x1b[2m--- reconnected ---\x1b[0m\r\n');
-            }
-            this._hasConnectedBefore = true;
-            setTimeout(() => { this._fit(); this.terminal.focus(); }, 60);
-            return;
-          }
-          if (m.type === 'exit') {
-            this.terminal.write('\r\n\x1b[33mShell exited (code ' + (m.exitCode ?? 0) + ')\x1b[0m\r\n');
-            this._setStatus('disconnected');
-            this._showOverlay('disconnected', 'Shell exited', 'Exit code: ' + (m.exitCode ?? 0));
-            return;
-          }
-          if (m.type === 'error') {
-            this.terminal.write('\r\n\x1b[31mError: ' + (m.message || 'unknown') + '\x1b[0m\r\n');
-            this._setStatus('error');
-            this._showOverlay('error', 'Shell error', String(m.message || 'Unknown error'));
-            return;
-          }
-          if (m.type === 'pong') return;
-        } catch { /* ignore */ }
-      }
-      this.terminal.write(typeof d === 'string' ? d : new Uint8Array(d));
-    };
-
-    ws.onclose = () => {
-      if (this._pingInterval) clearInterval(this._pingInterval);
-      if (this._destroyed || this.ws !== ws) return;
-      this._setStatus('disconnected');
-      this._needsReconnect = true;
-      if (this.el.parentNode) this._showOverlay('disconnected', 'Disconnected', 'Connection lost');
-    };
-
-    ws.onerror = () => {
-      if (this._destroyed || this.ws !== ws) return;
-      this._setStatus('error');
-      this._needsReconnect = true;
-      if (this.el.parentNode) this._showOverlay('error', 'Connection error', 'Failed to reach terminal server');
-    };
-  }
-
-  private _startPing(): void {
-    if (this._pingInterval) clearInterval(this._pingInterval);
-    this._pingInterval = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, 25000);
-  }
-
-  private _send(data: string): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'input', data }));
-    }
-  }
-
-  sendKey(seq: string): void { this._send(seq); this.terminal.focus(); }
-
-  private _fit(): void {
-    if (!this.fitAddon || this.el.classList.contains('hidden') || !this.el.parentNode) return;
-    try {
-      this.fitAddon.fit();
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'resize', cols: this.terminal.cols, rows: this.terminal.rows }));
-      }
-    } catch { /* ignore */ }
-  }
-
-  private _setStatus(s: string): void { this.status = s; if (this.onChange) this.onChange(this.id, s); }
-
-  private _showOverlay(type: string, title: string, sub?: string): void {
-    while (this.overlayEl.firstChild) this.overlayEl.removeChild(this.overlayEl.firstChild);
-    this.overlayEl.style.display = 'flex';
-    if (type === 'connecting') this.overlayEl.appendChild(el('div', 'wt-spinner'));
-    this.overlayEl.appendChild(el('div', 'wt-overlay-title', title));
-    if (sub) this.overlayEl.appendChild(el('div', 'wt-overlay-sub', sub));
-    if (type !== 'connecting') {
-      const btn = el('button', 'wt-overlay-btn', 'Reconnect');
-      btn.addEventListener('click', () => { this._reconnectAttempts = 0; this._connect(); });
-      this.overlayEl.appendChild(btn);
-    }
-  }
-
-  private _copyText(text: string): void {
-    if (!text) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(() => this._fallbackCopy(text));
-    } else { this._fallbackCopy(text); }
-  }
-
-  private _fallbackCopy(text: string): void {
-    const t = document.createElement('textarea');
-    t.value = text; t.style.cssText = 'position:fixed;top:-9999px';
-    document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t);
-  }
-
-  show(): void {
-    this.el.classList.remove('hidden');
-    if (this.status === 'connected' && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.overlayEl.style.display = 'none';
-      setTimeout(() => { this._fit(); this.terminal.focus(); }, 30);
-    } else if (this.status === 'connecting' && this.ws) {
-      setTimeout(() => { this._fit(); }, 30);
-    } else {
-      this._needsReconnect = false;
-      this._connect();
-    }
-  }
-
-  hide(): void { this.el.classList.add('hidden'); }
-  clear(): void { this.terminal.clear(); this.terminal.write('\x1b[2J\x1b[H'); }
-  copySelection(): void { this._copyText(this.terminal.getSelection()); }
-
-  reconnect(): void {
-    if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } this.ws = null; }
-    this.terminal.clear();
-    this._reconnectAttempts = 0;
-    this._connect();
-  }
-
-  updateFontSize(sz: number): void { this.terminal.options.fontSize = sz; this._fit(); }
-  updateTheme(name: string): void { const t = THEMES[name]; if (t) this.terminal.options.theme = t; }
-
-  detach(): void { if (this.el.parentNode) this.el.remove(); }
-
-  attachTo(container: HTMLElement): void {
-    container.appendChild(this.el);
-    setTimeout(() => {
-      try { this.terminal.refresh(0, this.terminal.rows - 1); this._fit(); } catch { /* ignore */ }
-    }, 50);
-  }
-
-  destroy(): void {
-    this._destroyed = true;
-    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
-    if (this._pingInterval) clearInterval(this._pingInterval);
-    this._ro.disconnect();
-    if (this._dataDisposable) this._dataDisposable.dispose();
-    if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } }
-    try { this.terminal.dispose(); } catch { /* ignore */ }
-    this.el.remove();
-  }
+  svg?: boolean;
+  seq?: string;
+  action?: 'ctrl' | 'alt' | 'paste' | 'keyboard';
+  title?: string;
 }
 
-// ── Module loader (cached) ────────────────────────────────────────────────────
-async function loadModules(): Promise<XtermModules> {
-  if (_G.modules) return _G.modules;
-  const results = await Promise.all([
-    import(CDN + '/@xterm/xterm@' + XTERM_VER),
-    import(CDN + '/@xterm/addon-fit@' + FIT_VER),
-    import(CDN + '/@xterm/addon-web-links@' + WEBLINKS_VER),
-    import(CDN + '/@xterm/addon-webgl@' + WEBGL_VER),
-    import(CDN + '/@xterm/addon-clipboard@' + CLIPBOARD_VER).catch(() => ({ ClipboardAddon: null })),
-    import(CDN + '/@xterm/addon-unicode11@' + UNICODE11_VER).catch(() => ({ Unicode11Addon: null })),
-  ]);
-  _G.modules = {
-    Terminal: results[0].Terminal, FitAddon: results[1].FitAddon,
-    WebLinksAddon: results[2].WebLinksAddon, WebglAddon: results[3].WebglAddon,
-    ClipboardAddon: results[4].ClipboardAddon, Unicode11Addon: results[5].Unicode11Addon,
-  };
-  return _G.modules;
-}
+const MOBILE_KEYS: KeyDef[] = [
+  { label: IC.keyboard, svg: true, action: 'keyboard', title: 'Show keyboard' },
+  { label: IC.paste, svg: true, action: 'paste', title: 'Paste' },
+  { label: 'ESC', seq: '\x1b' },
+  { label: 'TAB', seq: '\t' },
+  { label: 'CTRL', action: 'ctrl', title: 'Ctrl — applies to the next key you type' },
+  { label: 'ALT', action: 'alt', title: 'Alt — applies to the next key you type' },
+  // Ctrl+C used to be impossible from a phone: the bar had a CTRL toggle but
+  // no letters for it to combine with.
+  { label: '^C', seq: '\x03', title: 'Ctrl+C (interrupt)' },
+  { label: '^D', seq: '\x04', title: 'Ctrl+D (end of input)' },
+  { label: '^Z', seq: '\x1a', title: 'Ctrl+Z (suspend)' },
+  { label: IC.up, svg: true, seq: '\x1b[A', title: 'Up' },
+  { label: IC.down, svg: true, seq: '\x1b[B', title: 'Down' },
+  { label: IC.left, svg: true, seq: '\x1b[D', title: 'Left' },
+  { label: IC.right, svg: true, seq: '\x1b[C', title: 'Right' },
+  { label: 'HOME', seq: '\x1b[H' },
+  { label: 'END', seq: '\x1b[F' },
+  { label: 'PGUP', seq: '\x1b[5~' },
+  { label: 'PGDN', seq: '\x1b[6~' },
+  { label: '|', seq: '|' },
+  { label: '~', seq: '~' },
+  { label: '/', seq: '/' },
+  { label: '-', seq: '-' },
+  { label: '_', seq: '_' },
+];
+
+/** How long a closed tab can be brought back before its shell is killed. */
+const UNDO_WINDOW_MS = 8000;
 
 // ── Mount ─────────────────────────────────────────────────────────────────────
+
 export async function mount(container: HTMLElement, api: PluginAPI): Promise<void> {
+  // A previous mount may still own this container (React StrictMode, or a fast
+  // tab switch). Tear it down first so its listeners cannot outlive it.
+  unmount(container);
+
+  const state = globalState();
+  const generation = ++state.mountGen;
+
   injectStyles();
 
-  let mods: XtermModules;
-  try {
-    mods = await loadModules();
-  } catch (err) {
-    const errDiv = el('div');
-    errDiv.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:#f14c4c;padding:24px;text-align:center;font-family:sans-serif';
-    const inner = el('div');
-    inner.appendChild(el('div', null, 'Failed to load xterm.js'));
-    (inner.firstChild as HTMLElement).style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px';
-    const detail = el('div', null, (err as Error).message);
-    detail.style.cssText = 'font-size:12px;opacity:.7';
-    inner.appendChild(detail);
-    errDiv.appendChild(inner);
-    container.appendChild(errDiv);
-    return;
-  }
+  if (!state.prefs) state.prefs = loadPrefs();
+  const prefs = state.prefs;
 
-  if (!_G.prefs) {
-    _G.prefs = loadPrefs() as Prefs;
-    _G.prefs.theme = _G.prefs.theme || 'VS Dark';
-    _G.prefs.fontSize = _G.prefs.fontSize || 14;
-  }
-  const prefs = _G.prefs;
-  const isLight = (): boolean => prefs.theme === 'Light';
+  let hostTheme: PluginContext['theme'] = api.context?.theme === 'light' ? 'light' : 'dark';
+  const projectPath = (): string | null => api.context?.project?.path || null;
 
-  const root = el('div', 'wt-root' + (isLight() ? ' wt-light' : ''));
+  /** Shells reported by the backend, so the picker works even with no live tab. */
+  let serverInfo: { shells?: string[]; defaultShell?: string } | null = null;
+  const loadServerInfo = async (): Promise<void> => {
+    try { serverInfo = await api.rpc('GET', '/info') as typeof serverInfo; } catch { serverInfo = null; }
+  };
+
+  const root = el('div', 'wt-root');
+  const applyChrome = (): void => {
+    root.classList.toggle('wt-light', isLightTheme(resolveThemeName(prefs.theme, hostTheme)));
+  };
+  applyChrome();
   container.appendChild(root);
 
+  // ── Toolbar ────────────────────────────────────────────────────────────────
   const toolbar = el('div', 'wt-toolbar');
   root.appendChild(toolbar);
+
   const tabBar = el('div', 'wt-tabs');
+  tabBar.setAttribute('role', 'tablist');
+  tabBar.setAttribute('aria-label', 'Terminal tabs');
   toolbar.appendChild(tabBar);
-  const newBtn = el('button', 'wt-new-tab', '+');
-  newBtn.title = 'New tab';
-  toolbar.appendChild(newBtn);
-  toolbar.appendChild(divider());
 
+  const newTabButton = el('button', 'wt-new-tab', '+');
+  newTabButton.type = 'button';
+  newTabButton.title = 'New terminal (Ctrl+Shift+`)';
+  newTabButton.setAttribute('aria-label', 'New terminal');
+  toolbar.appendChild(newTabButton);
+
+  toolbar.appendChild(el('div', 'wt-divider'));
+
+  const searchButton = iconButton(IC.search, 'Search output (Ctrl+Shift+F)');
+  const copyButton = iconButton(IC.copy, 'Copy selection');
+  const clearButton = iconButton(IC.trash, 'Clear terminal');
+  toolbar.appendChild(searchButton);
+  toolbar.appendChild(copyButton);
+  toolbar.appendChild(clearButton);
+
+  // ── Settings popover ───────────────────────────────────────────────────────
   const settingsWrap = el('div', 'wt-settings-wrap');
-  const gearBtn = svgBtn(IC.gear, 'Settings');
-  settingsWrap.appendChild(gearBtn);
+  const gearButton = iconButton(IC.gear, 'Settings');
+  gearButton.setAttribute('aria-haspopup', 'dialog');
+  gearButton.setAttribute('aria-expanded', 'false');
+  settingsWrap.appendChild(gearButton);
+
   const popover = el('div', 'wt-popover');
+  popover.setAttribute('role', 'dialog');
+  popover.setAttribute('aria-label', 'Terminal settings');
 
-  popover.appendChild(el('label', null, 'Theme'));
-  const themeSel = document.createElement('select');
-  Object.keys(THEMES).forEach(name => {
-    const opt = document.createElement('option');
-    opt.value = name; opt.textContent = name;
-    if (name === prefs.theme) opt.selected = true;
-    themeSel.appendChild(opt);
-  });
-  popover.appendChild(themeSel);
+  const theme = selectField('Theme', THEME_NAMES.map((name) => ({ value: name, label: name })), prefs.theme);
+  popover.appendChild(theme.wrapper);
 
-  popover.appendChild(el('label', null, 'Font Size'));
-  const fsRow = el('div', 'wt-fs-row');
-  const fsMinus = svgBtn(IC.minus, 'Decrease');
-  const fsVal = el('span', null, prefs.fontSize + 'px');
-  const fsPlus = svgBtn(IC.plus, 'Increase');
-  fsRow.appendChild(fsMinus); fsRow.appendChild(fsVal); fsRow.appendChild(fsPlus);
-  popover.appendChild(fsRow);
+  popover.appendChild(el('label', undefined, 'Font Size'));
+  const fontRow = el('div', 'wt-fs-row');
+  const fontMinus = iconButton(IC.minus, 'Decrease font size');
+  const fontValue = el('span', undefined, `${prefs.fontSize}px`);
+  const fontPlus = iconButton(IC.plus, 'Increase font size');
+  fontRow.append(fontMinus, fontValue, fontPlus);
+  popover.appendChild(fontRow);
+
+  const cursor = selectField('Cursor', [
+    { value: 'block', label: 'Block' },
+    { value: 'bar', label: 'Bar' },
+    { value: 'underline', label: 'Underline' },
+  ], prefs.cursorStyle);
+  popover.appendChild(cursor.wrapper);
+
+  const shell = selectField('Shell (new tabs)', [{ value: '', label: 'System default' }], prefs.shell ?? '');
+  popover.appendChild(shell.wrapper);
+
+  const copyOnSelect = checkboxField('Copy on select', prefs.copyOnSelect);
+  popover.appendChild(copyOnSelect.label);
+  const webgl = checkboxField('GPU acceleration', prefs.webgl);
+  popover.appendChild(webgl.label);
+  const screenReader = checkboxField('Screen reader mode', prefs.screenReaderMode);
+  popover.appendChild(screenReader.label);
+
+  popover.appendChild(el(
+    'div', 'wt-hint',
+    'Ctrl+Shift+` new tab · Ctrl+Shift+F search · Ctrl+Shift+C/V copy & paste (⌘C/⌘V on macOS)',
+  ));
+
   settingsWrap.appendChild(popover);
   toolbar.appendChild(settingsWrap);
 
-  const panesEl = el('div', 'wt-panes');
-  root.appendChild(panesEl);
+  // ── Search bar ─────────────────────────────────────────────────────────────
+  const searchBar = el('div', 'wt-search');
+  const searchInput = el('input');
+  searchInput.type = 'search';
+  searchInput.placeholder = 'Find in terminal…';
+  searchInput.setAttribute('aria-label', 'Find in terminal');
+  const searchCount = el('span', 'wt-search-count');
+  const searchPrev = iconButton(IC.up, 'Previous match');
+  const searchNext = iconButton(IC.down, 'Next match');
+  const searchClose = iconButton(IC.close, 'Close search');
+  searchBar.append(searchInput, searchCount, searchPrev, searchNext, searchClose);
+  root.appendChild(searchBar);
+
+  // ── Panes + key bar ────────────────────────────────────────────────────────
+  const panes = el('div', 'wt-panes');
+  root.appendChild(panes);
+
+  const toast = el('div', 'wt-toast');
+  toast.setAttribute('role', 'status');
+  panes.appendChild(toast);
 
   const keybar = el('div', 'wt-keybar');
+  keybar.setAttribute('role', 'toolbar');
+  keybar.setAttribute('aria-label', 'Terminal keys');
   root.appendChild(keybar);
 
-  const MOBILE_KEYS: MobileKey[] = [
-    { label: IC.paste, seq: '__paste__', svg: true },
-    { label: 'ESC', seq: '\x1b' }, { label: 'TAB', seq: '\t' },
-    { label: 'CTRL', modifier: 'ctrl' }, { label: 'ALT', modifier: 'alt' },
-    { label: IC.up, seq: '\x1b[A', svg: true }, { label: IC.down, seq: '\x1b[B', svg: true },
-    { label: IC.left, seq: '\x1b[D', svg: true }, { label: IC.right, seq: '\x1b[C', svg: true },
-    { label: '|', seq: '|' }, { label: '~', seq: '~' }, { label: '/', seq: '/' },
-    { label: '-', seq: '-' }, { label: '_', seq: '_' },
-  ];
-
-  let ctrlActive = false, altActive = false;
-  let ctrlKeyEl: HTMLElement | null = null, altKeyEl: HTMLElement | null = null;
-
-  MOBILE_KEYS.forEach(k => {
-    const btn = el('button', 'wt-key');
-    if (k.svg) {
-      const span = el('span');
-      span.innerHTML = k.label; // eslint-disable-line -- trusted SVG constant
-      btn.appendChild(span);
-    } else {
-      btn.textContent = k.label;
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  function showToast(message: string, action?: { label: string; run: () => void }, durationMs = 1800): void {
+    toast.replaceChildren(document.createTextNode(message));
+    toast.classList.toggle('wt-actionable', !!action);
+    if (action) {
+      const button = el('button', 'wt-toast-action', action.label);
+      button.type = 'button';
+      button.addEventListener('click', () => { hideToast(); action.run(); });
+      toast.appendChild(button);
     }
+    toast.classList.add('wt-open');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, durationMs);
+  }
+  function hideToast(): void {
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    toast.classList.remove('wt-open');
+  }
 
-    if (k.modifier === 'ctrl') {
-      ctrlKeyEl = btn;
-      btn.addEventListener('click', () => {
-        ctrlActive = !ctrlActive; btn.classList.toggle('active', ctrlActive);
-        activeSession()?.terminal.focus();
-      });
-    } else if (k.modifier === 'alt') {
-      altKeyEl = btn;
-      btn.addEventListener('click', () => {
-        altActive = !altActive; btn.classList.toggle('active', altActive);
-        activeSession()?.terminal.focus();
-      });
-    } else if (k.seq === '__paste__') {
-      btn.addEventListener('click', () => {
-        const sess = activeSession();
-        if (!sess) return;
-        navigator.clipboard?.readText?.().then((t: string) => {
-          if (t) sess.sendKey(t);
-        }).catch(() => {});
-      });
-    } else {
-      btn.addEventListener('click', () => {
-        const sess = activeSession();
-        if (!sess) return;
-        let seq = k.seq!;
-        if (ctrlActive && seq.length === 1) {
-          const code = seq.toLowerCase().charCodeAt(0);
-          if (code >= 97 && code <= 122) seq = String.fromCharCode(code - 96);
-          ctrlActive = false;
-          if (ctrlKeyEl) ctrlKeyEl.classList.remove('active');
-        }
-        if (altActive && seq.length === 1) {
-          seq = '\x1b' + seq;
-          altActive = false;
-          if (altKeyEl) altKeyEl.classList.remove('active');
-        }
-        sess.sendKey(seq);
-      });
+  const activeSession = (): TerminalSession | undefined =>
+    state.activeId ? state.sessions.get(state.activeId) : undefined;
+
+  // ── Tab rendering ──────────────────────────────────────────────────────────
+
+  interface TabView { root: HTMLButtonElement; dot: HTMLElement; label: HTMLElement }
+  const tabViews = new Map<string, TabView>();
+
+  const STATUS_DOT: Record<string, string> = {
+    connected: '', connecting: 'wt-off', reconnecting: 'wt-warn',
+    disconnected: 'wt-off', exited: 'wt-off', error: 'wt-err',
+  };
+
+  function statusText(session: TerminalSession): string {
+    switch (session.status) {
+      case 'connected': return session.cwd ? `${session.title || session.label} — ${session.cwd}` : session.label;
+      case 'connecting': return 'Connecting…';
+      case 'reconnecting': return 'Reconnecting…';
+      case 'exited': return `Shell exited (code ${session.exitCode ?? 0})`;
+      case 'error': return 'Terminal error';
+      default: return 'Disconnected';
     }
-    keybar.appendChild(btn);
-  });
+  }
 
-  function activeSession(): TerminalSession | undefined { return _G.sessions.get(_G.activeId!); }
+  function syncTabView(session: TerminalSession): void {
+    const view = tabViews.get(session.id);
+    if (!view) return;
+    const selected = session.id === state.activeId;
+    view.root.setAttribute('aria-selected', String(selected));
+    view.root.tabIndex = selected ? 0 : -1;
+    view.label.textContent = session.label;
+    view.root.title = statusText(session);
+    view.dot.className = `wt-tab-dot ${bellRing.has(session.id) ? 'wt-warn' : STATUS_DOT[session.status] ?? ''}`.trim();
+  }
 
   function renderTabs(): void {
-    while (tabBar.firstChild) tabBar.removeChild(tabBar.firstChild);
-    for (const [id, sess] of _G.sessions) {
-      const tab = el('div', 'wt-tab' + (id === _G.activeId ? ' active' : ''));
-      const dot = el('div', 'wt-tab-dot' + (sess.status !== 'connected' ? ' off' : ''));
-      const lbl = el('span', null, sess.label);
-      const closeEl = el('button', 'wt-tab-close');
-      closeEl.textContent = '\u00d7'; closeEl.title = 'Close';
-      closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(id); });
-      tab.appendChild(dot); tab.appendChild(lbl); tab.appendChild(closeEl);
-      tab.addEventListener('click', () => activateTab(id));
-      tabBar.appendChild(tab);
+    // Rebuild only when the set of tabs changed; otherwise patch in place so
+    // the tab strip does not lose its scroll position on every status update.
+    const ids = [...state.sessions.keys()];
+    const same = ids.length === tabViews.size && ids.every((id) => tabViews.has(id));
+    if (!same) {
+      tabViews.clear();
+      tabBar.replaceChildren();
+      for (const session of state.sessions.values()) {
+        const tab = el('button', 'wt-tab');
+        tab.type = 'button';
+        tab.setAttribute('role', 'tab');
+        const dot = el('div', 'wt-tab-dot');
+        const label = el('span', 'wt-tab-label');
+        const close = iconButton(IC.close, `Close ${session.label}`, 'wt-tab-close');
+        close.addEventListener('click', (event) => { event.stopPropagation(); closeTab(session.id); });
+        tab.append(dot, label, close);
+        tab.addEventListener('click', () => activateTab(session.id));
+        tab.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+          event.preventDefault();
+          const order = [...state.sessions.keys()];
+          const next = order[(order.indexOf(session.id) + (event.key === 'ArrowRight' ? 1 : -1) + order.length) % order.length];
+          activateTab(next);
+          tabViews.get(next)?.root.focus();
+        });
+        tabBar.appendChild(tab);
+        tabViews.set(session.id, { root: tab, dot, label });
+      }
     }
+    for (const session of state.sessions.values()) syncTabView(session);
+  }
+
+  const bellRing = new Set<string>();
+  /** Tabs closed but still recoverable; the PTY dies when the timer fires. */
+  const pendingClose = new Map<string, { session: TerminalSession; timer: ReturnType<typeof setTimeout> }>();
+  // Declared here, above createSession(), and not next to the code that fills
+  // them: createSession() runs while mount() is still executing (restoring
+  // tabs, or opening the first one), so anything it touches must already be
+  // initialised or it hits the temporal dead zone.
+  const searchResultSubs = new Map<string, { dispose(): void }>();
+  const modifierButtons: Array<{ action: 'ctrl' | 'alt'; button: HTMLButtonElement }> = [];
+
+  function persistTabs(): void {
+    const tabs: StoredTab[] = [];
+    for (const session of state.sessions.values()) {
+      if (!session.serverSessionId) continue;
+      tabs.push({ sessionId: session.serverSessionId, label: session.label, active: session.id === state.activeId });
+    }
+    saveStoredTabs(tabs);
+  }
+
+  function handleSessionChange(session: TerminalSession): void {
+    syncTabView(session);
+    persistTabs();
   }
 
   function activateTab(id: string): void {
-    if (_G.activeId === id) return;
-    const prev = _G.sessions.get(_G.activeId!);
-    if (prev) prev.hide();
-    _G.activeId = id;
-    const sess = _G.sessions.get(id);
-    if (sess) sess.show();
+    if (!state.sessions.has(id)) return;
+    if (state.activeId && state.activeId !== id) state.sessions.get(state.activeId)?.hide();
+    state.activeId = id;
+    bellRing.delete(id);
+    state.sessions.get(id)?.show();
     renderTabs();
+    persistTabs();
+  }
+
+  function createSession(options: { resumeSessionId?: string; label?: string } = {}): TerminalSession {
+    state.tabCounter += 1;
+    const id = `t${state.tabCounter}`;
+    const session = new TerminalSession({
+      id,
+      index: state.tabCounter,
+      prefs,
+      cwd: projectPath(),
+      resumeSessionId: options.resumeSessionId ?? null,
+      label: options.label,
+      hostTheme,
+      onChange: handleSessionChange,
+      onBell: (bellSession) => {
+        if (bellSession.id === state.activeId) return;
+        bellRing.add(bellSession.id);
+        syncTabView(bellSession);
+      },
+    });
+    state.sessions.set(id, session);
+    session.onModifiersChange = syncModifierButtons;
+    watchSearchResults(session);
+    session.attachTo(panes);
+    return session;
   }
 
   function createTab(): void {
-    _G.tabCounter++;
-    const id = 't' + _G.tabCounter;
-    const sess = new TerminalSession({
-      id, label: 'shell ' + _G.tabCounter,
-      Terminal: mods.Terminal, FitAddon: mods.FitAddon,
-      WebLinksAddon: mods.WebLinksAddon, WebglAddon: mods.WebglAddon,
-      ClipboardAddon: mods.ClipboardAddon, Unicode11Addon: mods.Unicode11Addon,
-      prefs, onChange() { renderTabs(); },
-    });
-    _G.sessions.set(id, sess);
-    sess.attachTo(panesEl);
-    activateTab(id);
+    const session = createSession();
     renderTabs();
+    activateTab(session.id);
   }
 
+  /**
+   * Closing a tab is one small × away from destroying a running build, so the
+   * shell is only detached at first: it keeps running server-side until the
+   * undo window elapses, and Undo puts the tab straight back.
+   */
   function closeTab(id: string): void {
-    const sess = _G.sessions.get(id);
-    if (!sess) return;
-    sess.destroy(); _G.sessions.delete(id);
-    if (_G.sessions.size === 0) { _G.activeId = null; createTab(); return; }
-    if (_G.activeId === id) activateTab([..._G.sessions.keys()].pop()!);
-    renderTabs();
+    const session = state.sessions.get(id);
+    if (!session) return;
+
+    const wasActive = state.activeId === id;
+    const neighbours = [...state.sessions.keys()].filter((key) => key !== id);
+    state.sessions.delete(id);
+    bellRing.delete(id);
+    session.detach();
+    // tabViews is deliberately left alone: renderTabs() decides whether to
+    // rebuild by comparing the live sessions against it, so pruning it here
+    // made the two agree and the removed tab stayed on screen.
+
+    const undoTimer = setTimeout(() => {
+      pendingClose.delete(id);
+      session.terminate();
+    }, UNDO_WINDOW_MS);
+    pendingClose.set(id, { session, timer: undoTimer });
+
+    if (wasActive) state.activeId = null;
+    if (neighbours.length === 0) {
+      createTab();
+    } else {
+      renderTabs();
+      if (wasActive) activateTab(neighbours[neighbours.length - 1]);
+      else persistTabs();
+    }
+
+    showToast(`Closed ${session.label}`, {
+      label: 'Undo',
+      run: () => {
+        const pending = pendingClose.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pendingClose.delete(id);
+        state.sessions.set(id, pending.session);
+        pending.session.attachTo(panes);
+        pending.session.onModifiersChange = syncModifierButtons;
+        watchSearchResults(pending.session);
+        renderTabs();
+        activateTab(id);
+      },
+    }, UNDO_WINDOW_MS);
   }
 
-  if (_G.sessions.size > 0) {
-    for (const sess of _G.sessions.values()) {
-      sess.attachTo(panesEl);
-      sess.onChange = function() { renderTabs(); };
-      if (sess.id === _G.activeId) sess.show(); else sess.hide();
+  // ── Restore or create sessions ─────────────────────────────────────────────
+
+  if (state.sessions.size > 0) {
+    for (const session of state.sessions.values()) {
+      session.attachTo(panes);
+      if (session.id === state.activeId) session.show(); else session.hide();
     }
     renderTabs();
+    if (!state.activeId) activateTab([...state.sessions.keys()][0]);
   } else {
-    createTab();
+    const stored = state.restored ? [] : loadStoredTabs();
+    state.restored = true;
+    if (stored.length > 0) {
+      let activeId: string | null = null;
+      for (const tab of stored) {
+        const session = createSession({ resumeSessionId: tab.sessionId, label: tab.label });
+        if (tab.active) activeId = session.id;
+      }
+      renderTabs();
+      activateTab(activeId ?? [...state.sessions.keys()][0]);
+    } else {
+      createTab();
+    }
   }
 
-  newBtn.addEventListener('click', createTab);
+  // ── Wiring ─────────────────────────────────────────────────────────────────
 
+  newTabButton.addEventListener('click', createTab);
+  copyButton.addEventListener('click', () => {
+    const session = activeSession();
+    if (!session) return;
+    if (!session.terminal.hasSelection()) { showToast('Nothing selected'); return; }
+    session.copySelection();
+    showToast('Copied');
+  });
+  clearButton.addEventListener('click', () => activeSession()?.clear());
+
+  // Settings popover
   let popoverOpen = false;
-  gearBtn.addEventListener('click', (e) => {
-    e.stopPropagation(); popoverOpen = !popoverOpen;
-    popover.classList.toggle('open', popoverOpen);
-  });
-  const closePopover = (): void => { popoverOpen = false; popover.classList.remove('open'); };
-  document.addEventListener('click', closePopover);
-  popover.addEventListener('click', (e) => e.stopPropagation());
-
-  themeSel.addEventListener('change', () => {
-    prefs.theme = themeSel.value; savePrefs(prefs);
-    root.classList.toggle('wt-light', isLight());
-    for (const s of _G.sessions.values()) s.updateTheme(prefs.theme);
-  });
-  fsMinus.addEventListener('click', () => {
-    prefs.fontSize = Math.max(8, prefs.fontSize - 1);
-    fsVal.textContent = prefs.fontSize + 'px'; savePrefs(prefs);
-    for (const s of _G.sessions.values()) s.updateFontSize(prefs.fontSize);
-  });
-  fsPlus.addEventListener('click', () => {
-    prefs.fontSize = Math.min(32, prefs.fontSize + 1);
-    fsVal.textContent = prefs.fontSize + 'px'; savePrefs(prefs);
-    for (const s of _G.sessions.values()) s.updateFontSize(prefs.fontSize);
-  });
-
-  const onKey = (e: KeyboardEvent): void => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
-      e.preventDefault(); createTab();
+  function setPopover(open: boolean): void {
+    popoverOpen = open;
+    popover.classList.toggle('wt-open', open);
+    gearButton.setAttribute('aria-expanded', String(open));
+    if (open) {
+      renderShellOptions();
+      theme.select.focus();
     }
-  };
-  document.addEventListener('keydown', onKey);
-  const unsubCtx = api.onContextChange ? api.onContextChange(() => {}) : null;
+  }
+  function renderShellOptions(): void {
+    // Prefer the live session's handshake; fall back to the plugin's own HTTP
+    // endpoint through the host so the picker still works with no tab open.
+    const hello = activeSession()?.hello;
+    const shells = hello?.shells ?? serverInfo?.shells ?? [];
+    const defaultShell = hello?.defaultShell ?? serverInfo?.defaultShell;
+    shell.select.replaceChildren();
+    for (const value of ['', ...shells]) {
+      const option = el('option', undefined, value || `System default${defaultShell ? ` (${defaultShell})` : ''}`);
+      option.value = value;
+      if (value === (prefs.shell ?? '')) option.selected = true;
+      shell.select.appendChild(option);
+    }
+  }
+  gearButton.addEventListener('click', (event) => { event.stopPropagation(); setPopover(!popoverOpen); });
+  void loadServerInfo().then(() => { if (popoverOpen) renderShellOptions(); });
+  popover.addEventListener('click', (event) => event.stopPropagation());
+  popover.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { setPopover(false); gearButton.focus(); }
+  });
+  const closePopoverOnOutsideClick = (): void => { if (popoverOpen) setPopover(false); };
+  document.addEventListener('click', closePopoverOnOutsideClick);
 
-  (container as any)._wtCleanup = () => {
-    document.removeEventListener('keydown', onKey);
-    document.removeEventListener('click', closePopover);
-    if (unsubCtx) unsubCtx();
-    for (const sess of _G.sessions.values()) sess.detach();
+  function applyPrefsToAll(): void {
+    savePrefs(prefs);
+    applyChrome();
+    for (const session of state.sessions.values()) session.applyPrefs(prefs, hostTheme);
+  }
+
+  theme.select.addEventListener('change', () => { prefs.theme = theme.select.value; applyPrefsToAll(); });
+  cursor.select.addEventListener('change', () => {
+    prefs.cursorStyle = cursor.select.value as Prefs['cursorStyle'];
+    applyPrefsToAll();
+  });
+  shell.select.addEventListener('change', () => {
+    prefs.shell = shell.select.value || null;
+    savePrefs(prefs);
+    showToast('Applies to new tabs');
+  });
+  copyOnSelect.input.addEventListener('change', () => {
+    prefs.copyOnSelect = copyOnSelect.input.checked;
+    savePrefs(prefs);
+  });
+  webgl.input.addEventListener('change', () => { prefs.webgl = webgl.input.checked; applyPrefsToAll(); });
+  screenReader.input.addEventListener('change', () => {
+    prefs.screenReaderMode = screenReader.input.checked;
+    applyPrefsToAll();
+  });
+
+  const changeFontSize = (delta: number): void => {
+    prefs.fontSize = Math.max(8, Math.min(32, prefs.fontSize + delta));
+    fontValue.textContent = `${prefs.fontSize}px`;
+    applyPrefsToAll();
+  };
+  fontMinus.addEventListener('click', () => changeFontSize(-1));
+  fontPlus.addEventListener('click', () => changeFontSize(1));
+
+  // Search
+  function setSearch(open: boolean): void {
+    searchBar.classList.toggle('wt-open', open);
+    if (open) { searchInput.focus(); searchInput.select(); }
+    else {
+      activeSession()?.searchAddon.clearDecorations();
+      searchCount.textContent = '';
+      activeSession()?.focus();
+    }
+  }
+  const SEARCH_OPTIONS = {
+    decorations: {
+      matchBackground: '#5f5f00', matchBorder: '#e5e510',
+      matchOverviewRuler: '#e5e510',
+      activeMatchBackground: '#e5e510', activeMatchBorder: '#ffffff',
+      activeMatchColorOverviewRuler: '#ffffff',
+    },
+  };
+  function runSearch(direction: 'next' | 'prev', incremental = false): void {
+    const session = activeSession();
+    if (!session || !searchInput.value) { searchCount.textContent = ''; return; }
+    const options = { ...SEARCH_OPTIONS, incremental };
+    if (direction === 'next') session.searchAddon.findNext(searchInput.value, options);
+    else session.searchAddon.findPrevious(searchInput.value, options);
+  }
+  searchInput.addEventListener('input', () => runSearch('next', true));
+  searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); runSearch(event.shiftKey ? 'prev' : 'next'); }
+    if (event.key === 'Escape') { event.preventDefault(); setSearch(false); }
+  });
+  searchPrev.addEventListener('click', () => runSearch('prev'));
+  searchNext.addEventListener('click', () => runSearch('next'));
+  searchClose.addEventListener('click', () => setSearch(false));
+  searchButton.addEventListener('click', () => setSearch(!searchBar.classList.contains('wt-open')));
+
+  function watchSearchResults(session: TerminalSession): void {
+    if (searchResultSubs.has(session.id)) return;
+    searchResultSubs.set(session.id, session.searchAddon.onDidChangeResults((results) => {
+      if (session.id !== state.activeId) return;
+      searchCount.textContent = results && results.resultCount
+        ? `${results.resultIndex + 1}/${results.resultCount}`
+        : (searchInput.value ? 'no results' : '');
+    }));
+  }
+
+  // ── Mobile key bar ─────────────────────────────────────────────────────────
+  function syncModifierButtons(): void {
+    const session = activeSession();
+    for (const { action, button } of modifierButtons) {
+      const armed = action === 'ctrl' ? session?.pendingCtrl : session?.pendingAlt;
+      button.classList.toggle('wt-active', !!armed);
+      button.setAttribute('aria-pressed', String(!!armed));
+    }
+  }
+
+  for (const key of MOBILE_KEYS) {
+    const button = el('button', 'wt-key');
+    button.type = 'button';
+    const name = key.title ?? key.label;
+    button.title = name;
+    button.setAttribute('aria-label', name);
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    if (key.svg) {
+      const span = el('span');
+      span.innerHTML = key.label; // Constant markup from ui/icons.ts.
+      button.appendChild(span);
+    } else {
+      button.textContent = key.label;
+    }
+
+    if (key.action === 'ctrl' || key.action === 'alt') {
+      modifierButtons.push({ action: key.action, button });
+      button.setAttribute('aria-pressed', 'false');
+      button.addEventListener('click', () => {
+        const session = activeSession();
+        if (!session) return;
+        if (key.action === 'ctrl') session.pendingCtrl = !session.pendingCtrl;
+        else session.pendingAlt = !session.pendingAlt;
+        syncModifierButtons();
+        session.focus();
+      });
+    } else if (key.action === 'paste') {
+      button.addEventListener('click', () => {
+        activeSession()?.paste().catch((err: Error) => showToast(err.message));
+      });
+    } else if (key.action === 'keyboard') {
+      button.addEventListener('click', () => activeSession()?.focus());
+    } else {
+      button.addEventListener('click', () => activeSession()?.sendKey(key.seq!));
+    }
+    keybar.appendChild(button);
+  }
+
+  for (const session of state.sessions.values()) {
+    session.onModifiersChange = syncModifierButtons;
+    watchSearchResults(session);
+  }
+
+  // ── Keyboard shortcuts ─────────────────────────────────────────────────────
+  const onKeyDown = (event: KeyboardEvent): void => {
+    // Only while the terminal actually has focus, so these never fire while
+    // the user is typing in chat or the editor elsewhere in the app.
+    if (!root.contains(document.activeElement)) return;
+    const accel = (event.ctrlKey || event.metaKey) && event.shiftKey;
+    if (!accel) return;
+    // Ctrl+Shift+` mirrors VS Code and, unlike Ctrl+Shift+T, is not a reserved
+    // browser shortcut that the page cannot intercept.
+    if (event.key === '~' || event.code === 'Backquote') { event.preventDefault(); createTab(); return; }
+    if (event.key.toLowerCase() === 'f') { event.preventDefault(); setSearch(true); }
+  };
+  document.addEventListener('keydown', onKeyDown);
+
+  // ── Soft-keyboard viewport ─────────────────────────────────────────────────
+  const viewport = window.visualViewport;
+  const onViewportResize = (): void => {
+    if (!viewport) return;
+    // Only clamp while a soft keyboard is actually covering the page. Clamping
+    // unconditionally meant every narrow layout inherited a height cap it did
+    // not need, which is a lot of risk for a case that is easy to detect.
+    const keyboardOpen = window.innerHeight - viewport.height > 150;
+    if (!keyboardOpen) {
+      root.style.removeProperty('--wt-vvh');
+      return;
+    }
+    // Measure from where the plugin actually starts, not the top of the page:
+    // CloudCLI's own header sits above it.
+    const top = root.getBoundingClientRect().top;
+    root.style.setProperty('--wt-vvh', `${Math.max(120, Math.round(viewport.height - top))}px`);
+    activeSession()?.show();
+  };
+  viewport?.addEventListener('resize', onViewportResize);
+  onViewportResize();
+
+  // ── Host context ───────────────────────────────────────────────────────────
+  const unsubscribe = api.onContextChange?.((context) => {
+    const nextTheme = context.theme === 'light' ? 'light' : 'dark';
+    if (nextTheme !== hostTheme) {
+      hostTheme = nextTheme;
+      applyChrome();
+      for (const session of state.sessions.values()) session.applyPrefs(prefs, hostTheme);
+    }
+  }) ?? null;
+
+  renderTabs();
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  const cleanup = (): void => {
+    document.removeEventListener('keydown', onKeyDown);
+    document.removeEventListener('click', closePopoverOnOutsideClick);
+    viewport?.removeEventListener('resize', onViewportResize);
+    if (toastTimer) clearTimeout(toastTimer);
+    for (const sub of searchResultSubs.values()) { try { sub.dispose(); } catch { /* ignore */ } }
+    searchResultSubs.clear();
+    // Nothing can offer Undo once the UI is gone, so honour the close now.
+    for (const [, pending] of pendingClose) {
+      clearTimeout(pending.timer);
+      pending.session.terminate();
+    }
+    pendingClose.clear();
+    unsubscribe?.();
+    // Detach only the panes this mount put into the DOM. The sessions keep
+    // running; the next mount re-attaches them.
+    for (const session of state.sessions.values()) {
+      if (panes.contains(session.el)) session.detach();
+      session.onModifiersChange = null;
+    }
     root.remove();
   };
+
+  // A newer mount may have started while this one was setting up; if so, undo
+  // this one immediately rather than leaving two live UIs on the same state.
+  if (generation !== state.mountGen || !container.isConnected) {
+    cleanup();
+    return;
+  }
+  (container as HTMLElement & { _wtCleanup?: () => void })._wtCleanup = cleanup;
 }
 
 export function unmount(container: HTMLElement): void {
-  if ((container as any)._wtCleanup) {
-    (container as any)._wtCleanup();
-    delete (container as any)._wtCleanup;
-  }
+  const host = container as HTMLElement & { _wtCleanup?: () => void };
+  if (!host._wtCleanup) return;
+  const cleanup = host._wtCleanup;
+  delete host._wtCleanup;
+  try { cleanup(); } catch { /* already torn down */ }
 }
