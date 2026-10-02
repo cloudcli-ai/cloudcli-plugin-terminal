@@ -17,6 +17,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 
 import { SCROLLBACK, type Prefs } from './prefs.js';
 import { THEMES, resolveThemeName } from './ui/themes.js';
+import { attachTouchScroll } from './touch.js';
 import type { HelloMessage, ServerMessage } from './protocol.js';
 
 export type SessionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'exited' | 'error';
@@ -170,6 +171,7 @@ export class TerminalSession {
     }));
 
     this.terminal.attachCustomKeyEventHandler((event) => this.handleKey(event));
+    this.disposables.push(attachTouchScroll(this.terminal, this.el));
 
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
     this.resizeObserver.observe(this.el);
