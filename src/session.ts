@@ -390,10 +390,12 @@ export class TerminalSession {
     this.sendBytes(encoder.encode(data));
   }
 
-  /** Types a literal sequence, as the mobile key bar and paste button do. */
+  /**
+   * Types a literal sequence, as the mobile key bar does. Focus is left to the
+   * caller: on a phone, focusing the terminal raises the soft keyboard.
+   */
   sendKey(sequence: string): void {
     this.sendBytes(encoder.encode(sequence));
-    this.focus();
   }
 
   async paste(): Promise<void> {
@@ -410,7 +412,6 @@ export class TerminalSession {
     // normalisation. Writing to the socket directly skips both, which makes
     // multi-line pastes execute line by line in any shell that expects it.
     this.terminal.paste(text);
-    this.focus();
   }
 
   // ── Keyboard ────────────────────────────────────────────────────────────────
@@ -572,6 +573,8 @@ export class TerminalSession {
   }
 
   focus(): void { try { this.terminal.focus(); } catch { /* not attached */ } }
+
+  hasFocus(): boolean { return !!this.terminal.textarea && document.activeElement === this.terminal.textarea; }
 
   show(): void {
     this.el.hidden = false;

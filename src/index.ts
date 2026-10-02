@@ -632,6 +632,16 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
     }
   }
 
+  // Focusing the terminal is what raises a soft keyboard, so the bar only
+  // restores focus the tap found there; with the keyboard down, keys go to the
+  // shell and the keyboard stays down. Recorded on pointerdown, before
+  // anything the tap does can move focus.
+  let keyboardWasUp = false;
+  keybar.addEventListener('pointerdown', () => { keyboardWasUp = !!activeSession()?.hasFocus(); }, true);
+  const keepKeyboard = (session: TerminalSession | undefined): void => {
+    if (keyboardWasUp) session?.focus();
+  };
+
   for (const key of MOBILE_KEYS) {
     const button = el('button', 'wt-key');
     button.type = 'button';
@@ -656,16 +666,23 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
         if (key.action === 'ctrl') session.pendingCtrl = !session.pendingCtrl;
         else session.pendingAlt = !session.pendingAlt;
         syncModifierButtons();
-        session.focus();
+        keepKeyboard(session);
       });
     } else if (key.action === 'paste') {
       button.addEventListener('click', () => {
-        activeSession()?.paste().catch((err: Error) => showToast(err.message));
+        const session = activeSession();
+        session?.paste()
+          .then(() => keepKeyboard(session))
+          .catch((err: Error) => showToast(err.message));
       });
     } else if (key.action === 'keyboard') {
       button.addEventListener('click', () => activeSession()?.focus());
     } else {
-      button.addEventListener('click', () => activeSession()?.sendKey(key.seq!));
+      button.addEventListener('click', () => {
+        const session = activeSession();
+        session?.sendKey(key.seq!);
+        keepKeyboard(session);
+      });
     }
     keybar.appendChild(button);
   }
