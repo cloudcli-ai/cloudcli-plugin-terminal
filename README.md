@@ -46,6 +46,9 @@ Open the gear icon in the toolbar:
 |---|---|
 | Theme | `Auto (match app)` follows CloudCLI's light/dark mode |
 | Font size | 8–32 px, applied to every tab |
+| Font family | Preset monospace families (JetBrains Mono, Fira Code, …); only fonts installed on the viewing machine take effect, with CJK and emoji fallbacks kept |
+| Letter spacing | −2 to 4 px |
+| Line height | 1.00–2.00 in 0.05 steps |
 | Cursor | Block, bar or underline |
 | Shell (new tabs) | Any shell discovered on the host; existing tabs are unaffected |
 | Copy on select | Off by default |

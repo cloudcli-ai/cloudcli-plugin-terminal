@@ -134,6 +134,8 @@ export class TerminalSession {
       cursorStyle: options.prefs.cursorStyle,
       fontSize: options.prefs.fontSize,
       fontFamily: options.prefs.fontFamily,
+      letterSpacing: options.prefs.letterSpacing,
+      lineHeight: options.prefs.lineHeight,
       allowProposedApi: true,
       scrollback: SCROLLBACK,
       tabStopWidth: 8,
@@ -611,6 +613,8 @@ export class TerminalSession {
   applyPrefs(prefs: Prefs, hostTheme: 'dark' | 'light'): void {
     this.terminal.options.fontSize = prefs.fontSize;
     this.terminal.options.fontFamily = prefs.fontFamily;
+    this.terminal.options.letterSpacing = prefs.letterSpacing;
+    this.terminal.options.lineHeight = prefs.lineHeight;
     this.terminal.options.cursorStyle = prefs.cursorStyle;
     this.terminal.options.screenReaderMode = prefs.screenReaderMode;
     this.terminal.options.theme = THEMES[resolveThemeName(prefs.theme, hostTheme)];
