@@ -80,6 +80,14 @@ const PLUGIN_CSS = `
 .wt-pane .xterm-viewport { overflow-y:auto !important; scrollbar-width:thin; }
 .wt-pane .xterm-viewport::-webkit-scrollbar { width:10px; }
 .wt-pane .xterm-viewport::-webkit-scrollbar-thumb { background:rgba(128,128,128,.45); border-radius:5px; }
+/* CloudCLI's mobile stylesheet forces "user-select:text!important" onto every
+   .xterm for its own Shell's tap-hold selection. On iOS that lets WebKit claim
+   a finger drag as native text selection, after which touchmove never reaches
+   the terminal and nothing scrolls. Put back xterm's own default. */
+.wt-root .xterm, .wt-root .xterm .xterm-viewport {
+  -webkit-user-select:none !important; user-select:none !important;
+  -webkit-touch-callout:none !important;
+}
 .xterm .xterm-screen { outline:none !important; }
 
 .wt-overlay {
