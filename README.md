@@ -18,7 +18,8 @@ no SSH client and no external terminal needed.
 - **Shell picker** — run zsh, bash, fish, PowerShell… whatever the machine actually has
 - **Mobile key bar** — Esc, Tab, Ctrl, Alt, `^C`/`^D`/`^Z`, arrows, Home/End/PgUp/PgDn and the
   punctuation soft keyboards hide. The Ctrl and Alt keys apply to the next character you type,
-  so `Ctrl+<anything>` works from a phone.
+  so `Ctrl+<anything>` works from a phone; double-tap one to lock it for repeated chords (such as
+  a double `Ctrl+C`) until it is tapped again.
 - **Undo close** — closing a tab is recoverable for 8 seconds before the shell is killed
 - **Offline-ready** — xterm.js is bundled into the plugin, not fetched from a CDN at runtime
 - **Accessible** — keyboard-operable tabs and settings, ARIA labels, optional screen-reader mode,

@@ -25,6 +25,8 @@ export type SessionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disco
 const CONNECT_TIMEOUT_MS = 12000;
 const MAX_RECONNECT_DELAY_MS = 15000;
 const PING_INTERVAL_MS = 25000;
+/** Two taps on a key bar modifier within this window lock it. */
+const DOUBLE_TAP_MS = 500;
 
 const encoder = new TextEncoder();
 
@@ -78,6 +80,9 @@ export class TerminalSession {
   /** Set while a modifier key from the mobile bar is armed for the next press. */
   pendingCtrl = false;
   pendingAlt = false;
+  /** A locked modifier stays armed after each key until it is tapped again. */
+  ctrlLocked = false;
+  altLocked = false;
   onModifiersChange: (() => void) | null = null;
 
   private readonly overlayEl: HTMLElement;
@@ -106,6 +111,7 @@ export class TerminalSession {
   private pendingResume: string | null;
   /** Set while restart() is in flight, so the fresh shell is not reported as an expiry. */
   private restarting = false;
+  private modifierTapAt = { ctrl: 0, alt: 0 };
 
   private readonly onOnline = (): void => { if (this.status === 'reconnecting') this.connect(true); };
   private readonly onVisible = (): void => {
@@ -369,6 +375,24 @@ export class TerminalSession {
     }
   }
 
+  /**
+   * A tap on CTRL or ALT in the key bar. A single tap arms the modifier for
+   * the next key, as before; a second tap right after locks it, so a chord
+   * that repeats — Claude Code's double Ctrl+C to exit — can be typed at all.
+   * Any tap on a locked modifier releases it.
+   */
+  tapModifier(which: 'ctrl' | 'alt'): void {
+    const now = performance.now();
+    const armed = which === 'ctrl' ? this.pendingCtrl : this.pendingAlt;
+    const locked = which === 'ctrl' ? this.ctrlLocked : this.altLocked;
+    const doubleTap = armed && !locked && now - this.modifierTapAt[which] < DOUBLE_TAP_MS;
+    const nextLocked = doubleTap;
+    const nextArmed = doubleTap || (!armed && !locked);
+    this.modifierTapAt[which] = nextArmed && !nextLocked ? now : 0;
+    if (which === 'ctrl') { this.pendingCtrl = nextArmed; this.ctrlLocked = nextLocked; }
+    else { this.pendingAlt = nextArmed; this.altLocked = nextLocked; }
+  }
+
   private handleInput(data: string): void {
     // A modifier armed from the on-screen key bar applies to the next
     // character the soft keyboard produces, which is the only way to type
@@ -381,8 +405,8 @@ export class TerminalSession {
         else if (code >= 64 && code <= 95) out = String.fromCharCode(code - 64);
       }
       if (this.pendingAlt) out = `\x1b${out}`;
-      this.pendingCtrl = false;
-      this.pendingAlt = false;
+      if (!this.ctrlLocked) this.pendingCtrl = false;
+      if (!this.altLocked) this.pendingAlt = false;
       this.onModifiersChange?.();
       this.sendBytes(encoder.encode(out));
       return;

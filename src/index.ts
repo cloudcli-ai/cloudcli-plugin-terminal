@@ -117,8 +117,8 @@ const MOBILE_KEYS: KeyDef[] = [
   { label: IC.paste, svg: true, action: 'paste', title: 'Paste' },
   { label: 'ESC', seq: '\x1b' },
   { label: 'TAB', seq: '\t' },
-  { label: 'CTRL', action: 'ctrl', title: 'Ctrl — applies to the next key you type' },
-  { label: 'ALT', action: 'alt', title: 'Alt — applies to the next key you type' },
+  { label: 'CTRL', action: 'ctrl', title: 'Ctrl — applies to the next key you type; double-tap to lock' },
+  { label: 'ALT', action: 'alt', title: 'Alt — applies to the next key you type; double-tap to lock' },
   // Ctrl+C used to be impossible from a phone: the bar had a CTRL toggle but
   // no letters for it to combine with.
   { label: '^C', seq: '\x03', title: 'Ctrl+C (interrupt)' },
@@ -627,7 +627,9 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
     const session = activeSession();
     for (const { action, button } of modifierButtons) {
       const armed = action === 'ctrl' ? session?.pendingCtrl : session?.pendingAlt;
+      const locked = action === 'ctrl' ? session?.ctrlLocked : session?.altLocked;
       button.classList.toggle('wt-active', !!armed);
+      button.classList.toggle('wt-locked', !!locked);
       button.setAttribute('aria-pressed', String(!!armed));
     }
   }
@@ -648,13 +650,13 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
     }
 
     if (key.action === 'ctrl' || key.action === 'alt') {
-      modifierButtons.push({ action: key.action, button });
+      const modifier = key.action;
+      modifierButtons.push({ action: modifier, button });
       button.setAttribute('aria-pressed', 'false');
       button.addEventListener('click', () => {
         const session = activeSession();
         if (!session) return;
-        if (key.action === 'ctrl') session.pendingCtrl = !session.pendingCtrl;
-        else session.pendingAlt = !session.pendingAlt;
+        session.tapModifier(modifier);
         syncModifierButtons();
         session.focus();
       });

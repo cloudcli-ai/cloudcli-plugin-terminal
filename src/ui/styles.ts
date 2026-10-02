@@ -171,6 +171,7 @@ const PLUGIN_CSS = `
   user-select:none; -webkit-tap-highlight-color:transparent;
 }
 .wt-key:active, .wt-key.wt-active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.wt-key.wt-locked { box-shadow:inset 0 0 0 2px rgba(255,255,255,.85); }
 .wt-key, .wt-btn, .wt-tab, .wt-tab-close, .wt-new-tab { touch-action:manipulation; }
 .wt-key svg { width:16px; height:16px; }
 
