@@ -13,6 +13,7 @@ import type { PluginAPI, PluginContext } from './types.js';
 import { TerminalSession } from './session.js';
 import {
   loadPrefs, savePrefs, loadStoredTabs, saveStoredTabs,
+  FONT_PRESETS, clampLetterSpacing, clampLineHeight,
   type Prefs, type StoredTab,
 } from './prefs.js';
 import { injectStyles } from './ui/styles.js';
@@ -218,6 +219,31 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
   const fontPlus = iconButton(IC.plus, 'Increase font size');
   fontRow.append(fontMinus, fontValue, fontPlus);
   popover.appendChild(fontRow);
+
+  const fontOptions = FONT_PRESETS.map((preset) => ({ value: preset.family, label: preset.label }));
+  // A family set outside the picker (hand-edited storage) stays selectable
+  // instead of the picker silently claiming "Default".
+  if (!fontOptions.some((option) => option.value === prefs.fontFamily)) {
+    fontOptions.push({ value: prefs.fontFamily, label: 'Custom' });
+  }
+  const fontFamily = selectField('Font Family', fontOptions, prefs.fontFamily);
+  popover.appendChild(fontFamily.wrapper);
+
+  popover.appendChild(el('label', undefined, 'Letter Spacing'));
+  const spacingRow = el('div', 'wt-fs-row');
+  const spacingMinus = iconButton(IC.minus, 'Decrease letter spacing');
+  const spacingValue = el('span', undefined, `${prefs.letterSpacing}px`);
+  const spacingPlus = iconButton(IC.plus, 'Increase letter spacing');
+  spacingRow.append(spacingMinus, spacingValue, spacingPlus);
+  popover.appendChild(spacingRow);
+
+  popover.appendChild(el('label', undefined, 'Line Height'));
+  const lineHeightRow = el('div', 'wt-fs-row');
+  const lineHeightMinus = iconButton(IC.minus, 'Decrease line height');
+  const lineHeightValue = el('span', undefined, prefs.lineHeight.toFixed(2));
+  const lineHeightPlus = iconButton(IC.plus, 'Increase line height');
+  lineHeightRow.append(lineHeightMinus, lineHeightValue, lineHeightPlus);
+  popover.appendChild(lineHeightRow);
 
   const cursor = selectField('Cursor', [
     { value: 'block', label: 'Block' },
@@ -576,6 +602,27 @@ export async function mount(container: HTMLElement, api: PluginAPI): Promise<voi
   };
   fontMinus.addEventListener('click', () => changeFontSize(-1));
   fontPlus.addEventListener('click', () => changeFontSize(1));
+
+  fontFamily.select.addEventListener('change', () => {
+    prefs.fontFamily = fontFamily.select.value;
+    applyPrefsToAll();
+  });
+
+  const changeLetterSpacing = (delta: number): void => {
+    prefs.letterSpacing = clampLetterSpacing(prefs.letterSpacing + delta);
+    spacingValue.textContent = `${prefs.letterSpacing}px`;
+    applyPrefsToAll();
+  };
+  spacingMinus.addEventListener('click', () => changeLetterSpacing(-1));
+  spacingPlus.addEventListener('click', () => changeLetterSpacing(1));
+
+  const changeLineHeight = (delta: number): void => {
+    prefs.lineHeight = clampLineHeight(prefs.lineHeight + delta);
+    lineHeightValue.textContent = prefs.lineHeight.toFixed(2);
+    applyPrefsToAll();
+  };
+  lineHeightMinus.addEventListener('click', () => changeLineHeight(-0.05));
+  lineHeightPlus.addEventListener('click', () => changeLineHeight(0.05));
 
   // Search
   function setSearch(open: boolean): void {
