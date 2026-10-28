@@ -31,6 +31,7 @@ import {
 import type { ClientMessage, InitMessage, ServerMessage } from './protocol.js';
 import {
   listShells, resolveShell, resolveCwd, buildShellEnv, prioritizeUserNpmGlobalBin,
+  ensureSpawnHelperExecutable,
 } from './shell.js';
 
 const require = createRequire(import.meta.url);
@@ -102,7 +103,17 @@ function findModule(name: string): unknown {
   const attempts: string[] = [];
   const tryRequire = (specifier: string): unknown => {
     attempts.push(specifier);
-    try { return require(specifier); } catch { return null; }
+    let loaded: unknown;
+    try { loaded = require(specifier); } catch { return null; }
+    if (name === 'node-pty') {
+      try {
+        const manifest = path.isAbsolute(specifier)
+          ? path.join(specifier, 'package.json')
+          : require.resolve(`${specifier}/package.json`);
+        ensureSpawnHelperExecutable(path.dirname(manifest));
+      } catch { /* the repair is best effort; the module itself loaded */ }
+    }
+    return loaded;
   };
 
   const direct = tryRequire(name);

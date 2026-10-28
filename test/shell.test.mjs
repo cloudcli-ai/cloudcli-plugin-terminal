@@ -108,3 +108,31 @@ test('clampDimension keeps terminal sizes in range', () => {
   assert.equal(clampDimension(undefined, 80, MIN_COLS, MAX_COLS), 80);
   assert.equal(clampDimension(-5, 80, MIN_COLS, MAX_COLS), MIN_COLS);
 });
+
+test('ensureSpawnHelperExecutable restores the owner execute bit on darwin only', { skip: isWindows }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-pty-'));
+  const dir = path.join(root, 'prebuilds', 'darwin-arm64');
+  fs.mkdirSync(dir, { recursive: true });
+  const helper = path.join(dir, 'spawn-helper');
+  fs.writeFileSync(helper, '');
+  fs.chmodSync(helper, 0o644);
+
+  shell.ensureSpawnHelperExecutable(root, 'linux', 'arm64');
+  assert.equal(fs.statSync(helper).mode & 0o111, 0, 'other platforms are left alone');
+
+  shell.ensureSpawnHelperExecutable(root, 'darwin', 'x64');
+  assert.equal(fs.statSync(helper).mode & 0o111, 0, 'only the current architecture is touched');
+
+  shell.ensureSpawnHelperExecutable(root, 'darwin', 'arm64');
+  assert.equal(fs.statSync(helper).mode & 0o777, 0o744);
+
+  shell.ensureSpawnHelperExecutable(root, 'darwin', 'arm64'); // idempotent
+  assert.equal(fs.statSync(helper).mode & 0o777, 0o744);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('ensureSpawnHelperExecutable tolerates a layout without a prebuilt helper', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-pty-'));
+  assert.doesNotThrow(() => shell.ensureSpawnHelperExecutable(root, 'darwin', 'arm64'));
+  fs.rmSync(root, { recursive: true, force: true });
+});
