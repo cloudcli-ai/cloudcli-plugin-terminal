@@ -263,3 +263,25 @@ export function resolveCwd(requested: string | null | undefined, home?: string):
   }
   return process.cwd();
 }
+
+/**
+ * node-pty's npm tarball ships the `spawn-helper` under `prebuilds/` without the
+ * execute bit, and its own post-install chmod never runs because CloudCLI
+ * installs plugins with `--ignore-scripts`. `pty.spawn()` then fails on macOS
+ * with "posix_spawnp failed". Restore the owner execute bit on the helper of
+ * the node-pty copy that is actually loaded.
+ */
+export function ensureSpawnHelperExecutable(
+  nodePtyRoot: string,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): void {
+  if (platform !== 'darwin') return;
+  try {
+    const helper = path.join(nodePtyRoot, 'prebuilds', `darwin-${arch}`, 'spawn-helper');
+    const { mode } = fs.statSync(helper);
+    if ((mode & 0o100) === 0) fs.chmodSync(helper, mode | 0o100);
+  } catch {
+    // No prebuilt helper for this layout (source build, other arch): nothing to repair.
+  }
+}
