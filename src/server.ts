@@ -56,6 +56,14 @@ interface PtyProcess {
   write(data: string | Buffer): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
+  /**
+   * Closes the PTY master fd and then SIGHUPs the shell.
+   *
+   * Not in node-pty's public typings, but implemented by both UnixTerminal and
+   * WindowsTerminal. Optional here so an older node-pty still type-checks; see
+   * `disposePty`.
+   */
+  destroy?(): void;
   pause(): void;
   resume(): void;
   onData(callback: (data: string) => void): { dispose(): void };
@@ -231,13 +239,35 @@ function detachSession(session: Session): void {
   try { session.pty.resume(); } catch { /* already gone */ }
 }
 
+/**
+ * Tears a PTY down, master fd included.
+ *
+ * `kill()` only sends a signal: node-pty closes the master fd from its internal
+ * `exit` handler, which never runs if the shell survives the SIGHUP (it traps
+ * it, or sits in a foreground job that outlives the session). Every such reaped
+ * session then strands one `/dev/ptmx` handle, and PTYs are a fixed,
+ * machine-wide resource: `kern.tty.ptmx_max` on macOS (511 by default),
+ * `/proc/sys/kernel/pty/max` on Linux. Exhaust it and no process on the host
+ * can open a terminal at all — not this plugin, not the user's own terminal
+ * emulator.
+ *
+ * `destroy()` closes the fd first and signals afterwards, so it is safe on both
+ * a live and an already-exited shell.
+ */
+function disposePty(pty: PtyProcess): void {
+  try {
+    if (typeof pty.destroy === 'function') { pty.destroy(); return; }
+  } catch { /* fall through to the signal-only path */ }
+  try { pty.kill(); } catch { /* already gone */ }
+}
+
 function killSession(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
   sessions.delete(id);
   if (session.reapTimer) clearTimeout(session.reapTimer);
   session.dispose();
-  try { session.pty.kill(); } catch { /* already gone */ }
+  disposePty(session.pty);
   try { session.ws?.close(1000, 'session closed'); } catch { /* already gone */ }
 }
 
@@ -297,6 +327,11 @@ function createSession(options: {
     sessions.delete(id);
     if (session.reapTimer) clearTimeout(session.reapTimer);
     session.dispose();
+    // The shell is already gone, so this is only about the fd: node-pty's own
+    // close chain has a timeout fallback, and if that ever misses we would
+    // strand a `/dev/ptmx` handle. `destroy()` is a no-op once the socket is
+    // down, so paying for it here is free insurance.
+    disposePty(session.pty);
     if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'shell exited');
   });
 
